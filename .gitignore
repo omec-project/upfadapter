@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2021 Open Networking Foundation <info@opennetworking.org>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+
+# Toolchain
+.idea/
+.vscode/
+GPATH
+GRTAGS
+GTAGS
+TAGS
+tags
+cscope.*
+.DS_Store
+
+# debug
+*.log
+*.pcap
+vendor*
+*.patch
+
+# coverage
+./.coverage
