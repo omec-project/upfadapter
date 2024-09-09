@@ -12,6 +12,7 @@ import (
 
 	"github.com/omec-project/upfadapter/config"
 	"github.com/omec-project/upfadapter/logger"
+	"github.com/omec-project/upfadapter/metrics"
 	"github.com/omec-project/upfadapter/pfcp"
 	"github.com/omec-project/upfadapter/pfcp/udp"
 	"github.com/wmnsk/go-pfcp/message"
@@ -64,6 +65,10 @@ func init() {
 
 // Handler for msgs from SMF
 func main() {
+
+	// Initialise Statistics
+	go metrics.InitMetrics()
+
 	http.HandleFunc("/", handler)
 	err := http.ListenAndServe(":8090", nil)
 	if err != nil {
