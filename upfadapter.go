@@ -21,7 +21,7 @@ import (
 func handler(w http.ResponseWriter, req *http.Request) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
-		logger.AppLog.Errorf("server: could not read request body: %s\n", err)
+		logger.AppLog.Errorf("server: could not read request body: %s", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
@@ -39,7 +39,7 @@ func handler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	logger.AppLog.Debugf("\n received msg type [%v], upf nodeId [%s], smfIp [%v], msg [%v]",
+	logger.AppLog.Debugf("received msg type [%v], upf nodeId [%s], smfIp [%v], msg [%v]",
 		pfcpMessage.MessageType(), udpPodMsg.UpNodeID.NodeIdValue, udpPodMsg.SmfIp, udpPodMsg.Msg)
 
 	pfcpJsonRsp, err := pfcp.ForwardPfcpMsgToUpf(pfcpMessage, udpPodMsg.UpNodeID)

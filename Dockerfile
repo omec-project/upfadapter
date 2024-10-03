@@ -26,7 +26,7 @@ RUN if [ "$DEBUG_TOOLS" = "true" ]; then \
         fi
 
 # Set working dir
-WORKDIR /upfadapter
+WORKDIR /aether
 
 # Copy executable and default certs
 COPY --from=builder /go/src/upfadapter/bin/* .
