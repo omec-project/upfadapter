@@ -115,7 +115,7 @@ func SendPfcp(msg message.Message, addr *net.UDPAddr, eventData interface{}) err
 	tx := NewTransaction(msg, buf, Server.Conn, addr, eventData)
 	err = PutTransaction(tx)
 	if err != nil {
-		logger.PfcpLog.Errorf("Failed to send PFCP message: %v", err)
+		logger.PfcpLog.Errorf("failed to send PFCP message: %v", err)
 		return err
 	}
 	go startTxLifeCycle(tx)
@@ -209,14 +209,14 @@ func Run(Dispatch func(message.Message)) {
 	}
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		logger.PfcpLog.Errorf("Failed to listen on %s: %v", addr.String(), err)
+		logger.PfcpLog.Errorf("failed to listen on %s: %v", addr.String(), err)
 		return
 	}
 	Server = &PfcpServer{
 		Addr: addr,
 		Conn: conn,
 	}
-	logger.PfcpLog.Infof("Listen on %s", addr.String())
+	logger.PfcpLog.Infof("listen on %s", addr.String())
 
 	go func() {
 		for {
@@ -225,7 +225,7 @@ func Run(Dispatch func(message.Message)) {
 				if err.Error() == "Receive resend PFCP request" {
 					logger.PfcpLog.Infoln(err)
 				} else {
-					logger.PfcpLog.Warnf("Read PFCP error: %v", err)
+					logger.PfcpLog.Warnf("read PFCP error: %v", err)
 				}
 				continue
 			}
@@ -246,9 +246,9 @@ func removeTransaction(tx *Transaction) error {
 	if txTmp, exist := txTable.Load(tx.SequenceNumber); exist {
 		tx = txTmp
 		if tx.TxType == SendingRequest {
-			logger.PfcpLog.Debugf("Remove Request Transaction [%d]\n", tx.SequenceNumber)
+			logger.PfcpLog.Debugf("remove request transaction [%d]", tx.SequenceNumber)
 		} else if tx.TxType == SendingResponse {
-			logger.PfcpLog.Debugf("Remove Response Transaction [%d]\n", tx.SequenceNumber)
+			logger.PfcpLog.Debugf("remove response transaction [%d]", tx.SequenceNumber)
 		}
 
 		txTable.Delete(tx.SequenceNumber)
