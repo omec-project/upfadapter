@@ -61,6 +61,7 @@ func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID
 		}
 	case pfcp_message.MsgTypeHeartbeatRequest:
 
+        logger.PfcpLog.Infoln("Generate PFCP Heartbeat Request")
 		heartbeatReq, ok := pfcpMessage.(*pfcp_message.HeartbeatRequest)
 		if !ok {
 			return nil, fmt.Errorf("invalid heartbeat request")

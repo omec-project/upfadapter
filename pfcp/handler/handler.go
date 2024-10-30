@@ -137,16 +137,22 @@ func HandlePfcpHeartbeatResponse(msg message.Message) {
 		logger.PfcpLog.Errorln("invalid PFCP Heartbeat Response")
 		return
 	}
+
+	logger.PfcpLog.Infoln("handle PFCP Heartbeat Response")
+
 	recoveryTimestamp, err := heartbeatResp.RecoveryTimeStamp.RecoveryTimeStamp()
 	if err != nil {
 		logger.PfcpLog.Errorf("failed to parse recovery timestamp: %v", err)
 		return
 	}
 	logger.PfcpLog.Debugf("pfcp heartbeat response recovery timestamp [%v] ", recoveryTimestamp)
+
 	// Encode pfcp rsp to byte and send to http txn
 	if err := encodeAndSendRsp(msg); err != nil {
 		logger.PfcpLog.Errorf("handle pfcp heartbeat response error [%v] ", err)
 	}
+	logger.PfcpLog.Debugf("pfcp heartbeat response recovery timestamp [%v] sent******", recoveryTimestamp)
+
 }
 
 func HandlePfcpSessionEstablishmentResponse(msg message.Message) {

@@ -9,12 +9,15 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+    "flag"
 
 	"github.com/omec-project/upfadapter/config"
 	"github.com/omec-project/upfadapter/logger"
 	"github.com/omec-project/upfadapter/pfcp"
 	"github.com/omec-project/upfadapter/pfcp/udp"
 	"github.com/wmnsk/go-pfcp/message"
+	"github.com/omec-project/upfadapter/metrics"
+	"github.com/omec-project/upfadapter/factory"
 )
 
 // Hnadler for SMF initiated msgs
@@ -64,6 +67,22 @@ func init() {
 
 // Handler for msgs from SMF
 func main() {
+
+    // Read provided config
+    cfgFilePtr := flag.String("config", "../../config/config.yaml", "is a config file")
+    flag.Parse()
+    logger.AppLog.Infof("UPF adapter has started with configuration file [%v]", *cfgFilePtr)
+
+    factory.InitConfigFactory(*cfgFilePtr)
+
+	// Initialise Statistics
+	go metrics.InitMetrics()
+
+	// Init Kafka stream
+	if err := metrics.InitialiseKafkaStream(factory.UpfAdapterConfig.Configuration); err != nil {
+		logger.KafkaLog.Errorf("initialise kafka stream failed, %v ", err.Error())
+	}
+
 	http.HandleFunc("/", handler)
 	err := http.ListenAndServe(":8090", nil)
 	if err != nil {

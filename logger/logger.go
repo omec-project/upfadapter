@@ -15,6 +15,7 @@ var (
 	PfcpLog     *zap.SugaredLogger
 	CfgLog      *zap.SugaredLogger
 	atomicLevel zap.AtomicLevel
+	KafkaLog    *zap.SugaredLogger
 )
 
 func init() {
@@ -46,6 +47,7 @@ func init() {
 	AppLog = log.Sugar().With("component", "UADP", "category", "App")
 	PfcpLog = log.Sugar().With("component", "UADP", "category", "Pfcp")
 	CfgLog = log.Sugar().With("component", "UADP", "category", "Config")
+	KafkaLog = log.Sugar().With("component", "SMF", "category", "Kafka")
 }
 
 func GetLogger() *zap.Logger {
