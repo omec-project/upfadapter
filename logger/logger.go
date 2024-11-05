@@ -43,9 +43,9 @@ func init() {
 		panic(err)
 	}
 
-	AppLog = log.Sugar().With("component", "UADP", "category", "App")
-	PfcpLog = log.Sugar().With("component", "UADP", "category", "Pfcp")
-	CfgLog = log.Sugar().With("component", "UADP", "category", "Config")
+	AppLog = log.Sugar().With("component", "UPFAdapter", "category", "App")
+	PfcpLog = log.Sugar().With("component", "UPFAdapter", "category", "Pfcp")
+	CfgLog = log.Sugar().With("component", "UPFAdapter", "category", "Config")
 }
 
 func GetLogger() *zap.Logger {
