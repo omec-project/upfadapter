@@ -5,15 +5,14 @@
 
 FROM golang:1.23.2-bookworm AS builder
 
-LABEL maintainer="Aether SD-Core <dev@lists.aetherproject.org>"
-
 WORKDIR $GOPATH/src/upfadapter
 COPY . .
 RUN make all
 
 FROM alpine:3.20 AS upfadapter
 
-LABEL description="Aether open source 5G Core Network" \
+LABEL maintainer="Aether SD-Core <dev@lists.aetherproject.org>" \
+    description="ONF open source 5G Core Network" \
     version="Stage 3"
 
 ARG DEBUG_TOOLS
@@ -25,8 +24,5 @@ RUN if [ "$DEBUG_TOOLS" = "true" ]; then \
         apk update && apk add --no-cache -U vim strace net-tools curl netcat-openbsd bind-tools; \
         fi
 
-# Set working dir
-WORKDIR /aether
-
-# Copy executable and default certs
-COPY --from=builder /go/src/upfadapter/bin/* .
+# Copy executable
+COPY --from=builder /go/src/upfadapter/bin/* /usr/local/bin/.

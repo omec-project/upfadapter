@@ -102,7 +102,7 @@ func IsUpfAssociated(nodeId types.NodeID) bool {
 	UpfCfg.UpfListLock.RLock()
 	defer UpfCfg.UpfListLock.RUnlock()
 
-	logger.CfgLog.Debugf("associated upfs: [ %v]", UpfCfg.UPFs)
+	logger.CfgLog.Debugf("associated upfs: [%v]", UpfCfg.UPFs)
 
 	if upf := UpfCfg.UPFs[string(nodeId.NodeIdValue)]; upf != nil {
 		if upf.State == AssociatedSetUpSuccess {

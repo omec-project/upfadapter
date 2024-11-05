@@ -17,7 +17,7 @@ import (
 	"github.com/wmnsk/go-pfcp/message"
 )
 
-// Hnadler for SMF initiated msgs
+// Handler for SMF initiated msgs
 func handler(w http.ResponseWriter, req *http.Request) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -28,13 +28,13 @@ func handler(w http.ResponseWriter, req *http.Request) {
 	var udpPodMsg config.UdpPodPfcpMsg
 	err = json.Unmarshal(reqBody, &udpPodMsg)
 	if err != nil {
-		logger.AppLog.Errorf("error unmarshalling pfcp msg")
+		logger.AppLog.Errorln("error unmarshalling pfcp msg")
 		return
 	}
 
 	pfcpMessage, err := message.Parse(udpPodMsg.Msg.Body)
 	if err != nil {
-		logger.AppLog.Errorf("error parsing pfcp msg")
+		logger.AppLog.Errorln("error parsing pfcp msg")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
