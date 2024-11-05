@@ -50,17 +50,17 @@ func (n *NodeID) ResolveNodeIdToIp() net.IP {
 		return n.NodeIdValue
 	case NodeIdTypeFqdn:
 		if ip, err := getDnsHostIp(string(n.NodeIdValue)); err != nil {
-			logger.AppLog.Warnf("host [%v] not found in smf dns cache ", string(n.NodeIdValue))
+			logger.AppLog.Warnf("host [%v] not found in smf dns cache", string(n.NodeIdValue))
 			if ns, err := net.LookupHost(string(n.NodeIdValue)); err != nil {
 				logger.AppLog.Warnf("Host lookup failed: %+v", err)
 				return net.IPv4zero
 			} else {
-				logger.AppLog.Infof("host [%v] dns resolved, updating smf dns cache ", string(n.NodeIdValue))
+				logger.AppLog.Infof("host [%v] dns resolved, updating smf dns cache", string(n.NodeIdValue))
 				InsertDnsHostIp(string(n.NodeIdValue), net.ParseIP(ns[0]))
 				return net.ParseIP(ns[0])
 			}
 		} else {
-			logger.AppLog.Debugf("host [%v] found in smf dns cache ", string(n.NodeIdValue))
+			logger.AppLog.Debugf("host [%v] found in smf dns cache", string(n.NodeIdValue))
 			return ip
 		}
 	default:
@@ -82,13 +82,13 @@ func init() {
 
 func RefreshDnsHostIpCache() {
 	for hostName := range dnsHostIpCache {
-		logger.AppLog.Debugf("refreshing DNS for host [%v] ", hostName)
+		logger.AppLog.Debugf("refreshing DNS for host [%v]", hostName)
 		if ns, err := net.LookupHost(hostName); err != nil {
 			logger.AppLog.Warnf("Host lookup failed: %+v", err)
 			deleteDnsHost(hostName)
 			continue
 		} else if !dnsHostIpCache[hostName].Equal(net.ParseIP(ns[0])) {
-			logger.AppLog.Infof("smf dns cache updated for host [%v]: [%v] ", hostName, net.ParseIP(ns[0]).String())
+			logger.AppLog.Infof("smf dns cache updated for host [%v]: [%v]", hostName, net.ParseIP(ns[0]).String())
 			dnsHostIpCache[hostName] = net.ParseIP(ns[0])
 		}
 	}
