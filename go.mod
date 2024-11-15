@@ -1,9 +1,6 @@
-// SPDX-FileCopyrightText: 2022-present Intel Corporation
-//
-// SPDX-License-Identifier: Apache-2.0
 module github.com/omec-project/upfadapter
 
-go 1.21
+go 1.23
 
 require (
 	github.com/pkg/errors v0.9.1
