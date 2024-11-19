@@ -15,7 +15,7 @@ import (
 
 func HandlePfcpSendError(msg message.Message, pfcpErr error) {
 	msgType := msg.MessageType()
-	logger.PfcpLog.Errorf("send of PFCP msg [%v] failed with error [%v] ",
+	logger.PfcpLog.Errorf("send of PFCP msg [%v] failed with error [%v]",
 		msgType, pfcpErr.Error())
 	switch msgType {
 	case message.MsgTypeAssociationSetupRequest:
@@ -35,7 +35,7 @@ func HandlePfcpSendError(msg message.Message, pfcpErr error) {
 }
 
 func handleSendPfcpAssoSetReqError(msg message.Message, pfcpErr error) {
-	logger.PfcpLog.Debugf("send association setup request error [%v] ", pfcpErr.Error())
+	logger.PfcpLog.Debugf("send association setup request error [%v]", pfcpErr.Error())
 	// send Error
 	sendErrRsp(msg, pfcpErr)
 }
@@ -47,7 +47,7 @@ func handleSendPfcpHeartbeatReqError(msg message.Message, pfcpErr error) {
 }
 
 func handleSendPfcpSessEstReqError(msg message.Message, pfcpErr error) {
-	logger.PfcpLog.Debugf("send session establishment request error [%v] ", pfcpErr.Error())
+	logger.PfcpLog.Debugf("send session establishment request error [%v]", pfcpErr.Error())
 	// send Error
 	sendErrRsp(msg, pfcpErr)
 }
@@ -101,7 +101,7 @@ func HandlePfcpAssociationSetupResponse(msg message.Message) {
 		return
 	}
 
-	logger.PfcpLog.Debugf("HandlePfcpAssociationSetupResponse, recovery timestamp [%v] ", recoveryTimeStamp)
+	logger.PfcpLog.Debugf("handle pfcp association setup response, recovery timestamp [%v]", recoveryTimeStamp)
 
 	cause, err := rsp.Cause.Cause()
 	if err != nil {
@@ -117,7 +117,7 @@ func HandlePfcpAssociationSetupResponse(msg message.Message) {
 			return
 		}
 		// Add UPF as active
-		logger.PfcpLog.Debugf("node id from pfcp association response [%v] ", nodeIDstr)
+		logger.PfcpLog.Debugf("node id from pfcp association response [%v]", nodeIDstr)
 		nodeId := types.NewNodeID(nodeIDstr)
 		upf := config.ActivateUpfNode(nodeId)
 
@@ -127,7 +127,7 @@ func HandlePfcpAssociationSetupResponse(msg message.Message) {
 
 	// Encode pfcp rsp to byte and send to http txn
 	if err := encodeAndSendRsp(msg); err != nil {
-		logger.PfcpLog.Errorf("handle pfcp association response error [%v] ", err)
+		logger.PfcpLog.Errorf("handle pfcp association response error [%v]", err)
 	}
 }
 
@@ -142,10 +142,10 @@ func HandlePfcpHeartbeatResponse(msg message.Message) {
 		logger.PfcpLog.Errorf("failed to parse recovery timestamp: %v", err)
 		return
 	}
-	logger.PfcpLog.Debugf("pfcp heartbeat response recovery timestamp [%v] ", recoveryTimestamp)
+	logger.PfcpLog.Debugf("pfcp heartbeat response recovery timestamp [%v]", recoveryTimestamp)
 	// Encode pfcp rsp to byte and send to http txn
 	if err := encodeAndSendRsp(msg); err != nil {
-		logger.PfcpLog.Errorf("handle pfcp heartbeat response error [%v] ", err)
+		logger.PfcpLog.Errorf("handle pfcp heartbeat response error [%v]", err)
 	}
 }
 
@@ -157,7 +157,7 @@ func HandlePfcpSessionEstablishmentResponse(msg message.Message) {
 	}
 	// Encode pfcp rsp to byte and send to http txn
 	if err := encodeAndSendRsp(msg); err != nil {
-		logger.PfcpLog.Errorf("handle pfcp session establishment response error [%v] ", err)
+		logger.PfcpLog.Errorf("handle pfcp session establishment response error [%v]", err)
 	}
 }
 
@@ -169,7 +169,7 @@ func HandlePfcpSessionModificationResponse(msg message.Message) {
 	}
 	// Encode pfcp rsp to byte and send to http txn
 	if err := encodeAndSendRsp(msg); err != nil {
-		logger.PfcpLog.Errorf("handle pfcp session modify response error [%v] ", err)
+		logger.PfcpLog.Errorf("handle pfcp session modify response error [%v]", err)
 	}
 }
 
@@ -181,7 +181,7 @@ func HandlePfcpSessionDeletionResponse(msg message.Message) {
 	}
 	// Encode pfcp rsp to byte and send to http txn
 	if err := encodeAndSendRsp(msg); err != nil {
-		logger.PfcpLog.Errorf("handle pfcp session delete response error [%v] ", err)
+		logger.PfcpLog.Errorf("handle pfcp session delete response error [%v]", err)
 	}
 }
 
@@ -195,7 +195,7 @@ func BuildPfcpAssociationResponse(nodeId *types.NodeID, seqNo uint32) (*message.
 	}
 
 	logger.AppLog.Errorf("upf [%v] not found", string(nodeId.NodeIdValue))
-	return nil, fmt.Errorf("upf not found : %v", string(nodeId.NodeIdValue))
+	return nil, fmt.Errorf("upf not found: %v", string(nodeId.NodeIdValue))
 }
 
 func BuildPfcpHeartBeatResponse(nodeId *types.NodeID, seqNo uint32) (*message.HeartbeatResponse, error) {
@@ -207,5 +207,5 @@ func BuildPfcpHeartBeatResponse(nodeId *types.NodeID, seqNo uint32) (*message.He
 		return &pfcpMsg, nil
 	}
 
-	return nil, fmt.Errorf("upf not found : %v", string(nodeId.NodeIdValue))
+	return nil, fmt.Errorf("upf not found: %v", string(nodeId.NodeIdValue))
 }
