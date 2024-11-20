@@ -87,7 +87,7 @@ func ProbeUpfHearbeatReq() {
 			if config.IsUpfAssociated(upf.NodeID) {
 				pfcpMsg, err := config.BuildPfcpHeartbeatRequest()
 				if err != nil {
-					logger.PfcpLog.Errorf("Failed to build heartbeat request for upf [%v]", nodeId)
+					logger.PfcpLog.Errorf("failed to build heartbeat request for upf [%v]", nodeId)
 					continue
 				}
 				err1 := SendHeartbeatRequest(upf.NodeID, pfcpMsg)
