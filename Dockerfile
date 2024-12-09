@@ -9,7 +9,7 @@ WORKDIR $GOPATH/src/upfadapter
 COPY . .
 RUN make all
 
-FROM alpine:3.20 AS upfadapter
+FROM alpine:3.21 AS upfadapter
 
 LABEL maintainer="Aether SD-Core <dev@lists.aetherproject.org>" \
     description="ONF open source 5G Core Network" \
