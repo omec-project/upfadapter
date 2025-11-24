@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/wmnsk/go-pfcp v0.0.24
-	go.uber.org/zap v1.27.0
+	go.uber.org/zap v1.27.1
 )
 
 require (
