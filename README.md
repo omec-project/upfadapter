@@ -10,3 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 `upfadapter` is required to scale the SMF's in SD-Core. The SMF sends custom PFCP messages to `upfadapter`, which intercepts and modifies specific fields before sending the messages to the UPF. 
 
 ![alt text](image.png)
+
+## Reach out to us through
+
+1. #sdcore-dev channel in [Aether Community Slack](https://aether5g-project.slack.com)
