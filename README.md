@@ -4,6 +4,7 @@ SPDX-FileCopyrightText: 2024 Canonical Ltd.
 SPDX-License-Identifier: Apache-2.0
 -->
 <!-- [![Go Report Card](https://goreportcard.com/badge/github.com/omec-project/upfadapter)](https://goreportcard.com/report/github.com/omec-project/upfadapter) -->
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/omec-project/upfadapter/badge)](https://scorecard.dev/viewer/?uri=github.com/omec-project/upfadapter)
 
 # upfadapter
 
