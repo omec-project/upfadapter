@@ -4,6 +4,7 @@
 package types
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
@@ -51,7 +52,7 @@ func (n *NodeID) ResolveNodeIdToIp() net.IP {
 	case NodeIdTypeFqdn:
 		if ip, err := getDnsHostIp(string(n.NodeIdValue)); err != nil {
 			logger.AppLog.Warnf("host [%v] not found in smf dns cache", string(n.NodeIdValue))
-			if ns, err := net.LookupHost(string(n.NodeIdValue)); err != nil {
+			if ns, err := net.DefaultResolver.LookupHost(context.Background(), string(n.NodeIdValue)); err != nil {
 				logger.AppLog.Warnf("Host lookup failed: %+v", err)
 				return net.IPv4zero
 			} else {
@@ -83,7 +84,7 @@ func init() {
 func RefreshDnsHostIpCache() {
 	for hostName := range dnsHostIpCache {
 		logger.AppLog.Debugf("refreshing DNS for host [%v]", hostName)
-		if ns, err := net.LookupHost(hostName); err != nil {
+		if ns, err := net.DefaultResolver.LookupHost(context.Background(), hostName); err != nil {
 			logger.AppLog.Warnf("Host lookup failed: %+v", err)
 			deleteDnsHost(hostName)
 			continue
