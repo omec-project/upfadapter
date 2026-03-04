@@ -1,6 +1,6 @@
 module github.com/omec-project/upfadapter
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/wmnsk/go-pfcp v0.0.24
