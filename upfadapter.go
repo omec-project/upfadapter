@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/omec-project/upfadapter/config"
 	"github.com/omec-project/upfadapter/logger"
 	"github.com/omec-project/upfadapter/pfcp"
 	"github.com/omec-project/upfadapter/pfcp/udp"
 	"github.com/wmnsk/go-pfcp/message"
+	"go.uber.org/zap"
 )
 
 // Handler for SMF initiated msgs
@@ -64,6 +66,14 @@ func init() {
 
 // Handler for msgs from SMF
 func main() {
+	if lvl := os.Getenv("UPFADAPTER_LOG_LEVEL"); lvl != "" {
+		if level, err := zap.ParseAtomicLevel(lvl); err != nil {
+			logger.CfgLog.Warnf("invalid UPFADAPTER_LOG_LEVEL [%s], keeping default info", lvl)
+		} else {
+			logger.SetLogLevel(level.Level())
+		}
+	}
+
 	http.HandleFunc("/", handler)
 	err := http.ListenAndServe(":8090", nil)
 	if err != nil {

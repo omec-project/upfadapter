@@ -12,7 +12,6 @@ import (
 
 	"github.com/omec-project/upfadapter/logger"
 	"github.com/omec-project/upfadapter/types"
-	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 )
 
@@ -88,16 +87,6 @@ func init() {
 	UpfTxns = make(map[uint32]PfcpTxnChan)
 }
 
-// BuildPfcpHeartbeatRequest shall trigger hearbeat request to all Attached UPFs
-func BuildPfcpHeartbeatRequest() (*message.HeartbeatRequest, error) {
-	msg := message.NewHeartbeatRequest(
-		0,
-		ie.NewRecoveryTimeStamp(UpfServerStartTime),
-		nil,
-	)
-	return msg, nil
-}
-
 func IsUpfAssociated(nodeId types.NodeID) bool {
 	UpfCfg.UpfListLock.RLock()
 	defer UpfCfg.UpfListLock.RUnlock()
@@ -169,16 +158,6 @@ func ActivateUpfNode(nodeId *types.NodeID) *UPNode {
 	}
 	logger.CfgLog.Errorf("upf node [%v] not found ", nodeId)
 	return nil
-}
-
-func RemoveUpfNode(upfName string) {
-	UpfCfg.UpfListLock.Lock()
-	defer UpfCfg.UpfListLock.Unlock()
-
-	if upf, ok := UpfCfg.UPFs[upfName]; ok {
-		delete(UpfCfg.UPFs, upf.UpfName)
-		logger.CfgLog.Infof("deleting upf node [%v] ", upf.UpfName)
-	}
 }
 
 func InsertUpfPfcpTxn(seq uint32, pfcpTxnChan PfcpTxnChan) {
