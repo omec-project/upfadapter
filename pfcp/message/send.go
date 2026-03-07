@@ -5,9 +5,7 @@ package message
 
 import (
 	"net"
-	"time"
 
-	"github.com/omec-project/upfadapter/config"
 	"github.com/omec-project/upfadapter/logger"
 	"github.com/omec-project/upfadapter/pfcp/handler"
 	"github.com/omec-project/upfadapter/pfcp/udp"
@@ -76,25 +74,4 @@ func SendPfcpSessionDeletionRequest(upNodeID types.NodeID, pMsg message.Message)
 		return err
 	}
 	return nil
-}
-
-// Go routine to send hearbeat towards UPFs
-func ProbeUpfHearbeatReq() {
-	for {
-		time.Sleep(5 * time.Second)
-		for nodeId, upf := range config.UpfCfg.UPFs {
-			logger.PfcpLog.Debugf("sending heartbeat request to upf [%v]", nodeId)
-			if config.IsUpfAssociated(upf.NodeID) {
-				pfcpMsg, err := config.BuildPfcpHeartbeatRequest()
-				if err != nil {
-					logger.PfcpLog.Errorf("failed to build heartbeat request for upf [%v]", nodeId)
-					continue
-				}
-				err1 := SendHeartbeatRequest(upf.NodeID, pfcpMsg)
-				if err1 != nil {
-					continue
-				}
-			}
-		}
-	}
 }

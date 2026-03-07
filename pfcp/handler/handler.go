@@ -197,15 +197,3 @@ func BuildPfcpAssociationResponse(nodeId *types.NodeID, seqNo uint32) (*message.
 	logger.AppLog.Errorf("upf [%v] not found", string(nodeId.NodeIdValue))
 	return nil, fmt.Errorf("upf not found: %v", string(nodeId.NodeIdValue))
 }
-
-func BuildPfcpHeartBeatResponse(nodeId *types.NodeID, seqNo uint32) (*message.HeartbeatResponse, error) {
-	logger.PfcpLog.Debugf("building pfcp heartbeat response for upf:[%v], seqNo:[%v]", nodeId, seqNo)
-	if upf := config.GetUpfFromNodeId(nodeId); upf != nil {
-		pfcpMsg := upf.LastHBRsp
-		logger.PfcpLog.Debugf("stored heartbeat rsp recovery timestamp: %v", pfcpMsg.RecoveryTimeStamp)
-		pfcpMsg.Header.SequenceNumber = seqNo
-		return &pfcpMsg, nil
-	}
-
-	return nil, fmt.Errorf("upf not found: %v", string(nodeId.NodeIdValue))
-}

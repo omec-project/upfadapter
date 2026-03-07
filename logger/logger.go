@@ -48,12 +48,8 @@ func init() {
 	CfgLog = log.Sugar().With("component", "UPFAdapter", "category", "Config")
 }
 
-func GetLogger() *zap.Logger {
-	return log
-}
-
-// SetLogLevel: set the log level (panic|fatal|error|warn|info|debug)
+// SetLogLevel sets the runtime log level (panic|fatal|error|warn|info|debug)
 func SetLogLevel(level zapcore.Level) {
-	AppLog.Infoln("set log level:", level)
+	CfgLog.Infoln("set log level:", level)
 	atomicLevel.SetLevel(level)
 }
