@@ -6,6 +6,7 @@
 package udp
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -40,6 +41,12 @@ type PfcpServer struct {
 }
 
 var Server *PfcpServer
+
+// ErrResendRequest reports that a peer retransmitted a request the adapter is already
+// answering, which is ordinary and not a read failure. It was previously compared by
+// message text, in a spelling the text never had, so every retransmission was logged as
+// an error -- unnoticed while no user-plane-originated request was handled at all.
+var ErrResendRequest = errors.New("receive resend PFCP request")
 
 var (
 	ServerStartTime time.Time
@@ -122,49 +129,52 @@ func SendPfcp(msg message.Message, addr *net.UDPAddr, eventData interface{}) err
 	return nil
 }
 
-func readPfcpMessage() (message.Message, error) {
+// readPfcpMessage returns the peer address alongside the message. A message the
+// user-plane function originates -- a session report -- has to be answered and
+// relayed, and neither is possible without knowing who sent it.
+func readPfcpMessage() (message.Message, *net.UDPAddr, error) {
 	if Server == nil {
-		return nil, fmt.Errorf("PFCP server is not initialized")
+		return nil, nil, fmt.Errorf("PFCP server is not initialized")
 	}
 	if Server.Conn == nil {
-		return nil, fmt.Errorf("PFCP server is not listening")
+		return nil, nil, fmt.Errorf("PFCP server is not listening")
 	}
 
 	buf := make([]byte, PFCP_MAX_UDP_LEN)
 	n, addr, err := Server.Conn.ReadFromUDP(buf)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	msg, err := message.Parse(buf[:n])
 	if err != nil {
 		logger.PfcpLog.Errorf("error parsing PFCP message: %v", err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	if IsRequest(msg) {
 		// Todo: Implement SendingResponse type of reliable delivery
 		tx, err := findTransaction(msg, addr)
 		if err != nil {
-			return msg, err
+			return msg, addr, err
 		} else if tx != nil {
 			// err == nil && tx != nil => Resend Request
-			err = fmt.Errorf("receive resend PFCP request")
+			err = ErrResendRequest
 			tx.EventChannel <- ReceiveResendRequest
-			return msg, err
+			return msg, addr, err
 		} else {
 			// err == nil && tx == nil => New Request
-			return msg, nil
+			return msg, addr, nil
 		}
 	} else if IsResponse(msg) {
 		tx, err := findTransaction(msg, Server.Addr)
 		if err != nil {
-			return msg, err
+			return msg, addr, err
 		}
 		tx.EventChannel <- ReceiveValidResponse
 	}
 
-	return msg, nil
+	return msg, addr, nil
 }
 
 func findTransaction(msg message.Message, addr *net.UDPAddr) (*Transaction, error) {
@@ -202,7 +212,7 @@ func findTransaction(msg message.Message, addr *net.UDPAddr) (*Transaction, erro
 	return tx, nil
 }
 
-func Run(Dispatch func(message.Message)) {
+func Run(Dispatch func(message.Message, *net.UDPAddr)) {
 	addr := &net.UDPAddr{
 		IP:   net.ParseIP(CPNodeID.ResolveNodeIdToIp().String()),
 		Port: PFCP_PORT,
@@ -220,16 +230,16 @@ func Run(Dispatch func(message.Message)) {
 
 	go func() {
 		for {
-			pfcpMessage, err := readPfcpMessage()
+			pfcpMessage, remoteAddr, err := readPfcpMessage()
 			if err != nil {
-				if err.Error() == "Receive resend PFCP request" {
+				if errors.Is(err, ErrResendRequest) {
 					logger.PfcpLog.Infoln(err)
 				} else {
 					logger.PfcpLog.Warnf("read PFCP error: %v", err)
 				}
 				continue
 			}
-			go Dispatch(pfcpMessage)
+			go Dispatch(pfcpMessage, remoteAddr)
 		}
 	}()
 

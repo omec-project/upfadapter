@@ -44,6 +44,10 @@ func handler(w http.ResponseWriter, req *http.Request) {
 	logger.AppLog.Debugf("received msg type [%v], upf nodeId [%s], smfIp [%v], msg [%v]",
 		pfcpMessage.MessageType(), udpPodMsg.UpNodeID.NodeIdValue, udpPodMsg.SmfIp, udpPodMsg.Msg)
 
+	// Remember where the SMF is. A message the user-plane function originates arrives
+	// with no request of ours to answer, so this is the only address we can relay it to.
+	config.SetSmfAddr(udpPodMsg.SmfIp)
+
 	pfcpJsonRsp, err := pfcp.ForwardPfcpMsgToUpf(pfcpMessage, udpPodMsg.UpNodeID)
 	if err != nil {
 		logger.AppLog.Errorf("error forwarding pfcp msg to UPF: %v", err)
