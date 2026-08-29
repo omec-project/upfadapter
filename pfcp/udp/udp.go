@@ -245,9 +245,10 @@ func removeTransaction(tx *Transaction) error {
 
 	if txTmp, exist := txTable.Load(tx.SequenceNumber); exist {
 		tx = txTmp
-		if tx.TxType == SendingRequest {
+		switch tx.TxType {
+		case SendingRequest:
 			logger.PfcpLog.Debugf("remove request transaction [%d]", tx.SequenceNumber)
-		} else if tx.TxType == SendingResponse {
+		case SendingResponse:
 			logger.PfcpLog.Debugf("remove response transaction [%d]", tx.SequenceNumber)
 		}
 

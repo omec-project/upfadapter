@@ -190,7 +190,7 @@ func BuildPfcpAssociationResponse(nodeId *types.NodeID, seqNo uint32) (*message.
 	if upf := config.GetUpfFromNodeId(nodeId); upf != nil {
 		lastAssociationRsp := upf.LastAssoRsp
 		logger.AppLog.Debugf("stored association response recovery timestamp: %v", lastAssociationRsp.RecoveryTimeStamp)
-		lastAssociationRsp.Header.SequenceNumber = seqNo
+		lastAssociationRsp.SequenceNumber = seqNo
 		return &lastAssociationRsp, nil
 	}
 
