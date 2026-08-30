@@ -30,18 +30,18 @@ const (
 // UPF structure
 type UPNode struct {
 	UpfName     string
-	NodeID      types.NodeID
-	ANIP        net.IP
-	State       UPFStatus
 	LastAssoRsp message.AssociationSetupResponse
 	LastHBRsp   message.HeartbeatResponse
+	ANIP        net.IP
+	NodeID      types.NodeID
+	State       UPFStatus
 	UpfLock     sync.RWMutex
 }
 
 // All UPF nodes
 type Config struct {
-	UpfListLock sync.RWMutex
 	UPFs        map[string]*UPNode
+	UpfListLock sync.RWMutex
 }
 
 type UdpPodMsgType int
@@ -51,16 +51,15 @@ type adapterMessage struct {
 }
 
 type UdpPodPfcpMsg struct {
-	SmfIp    string       `json:"smfIp"`
-	UpNodeID types.NodeID `json:"upNodeID"`
-	// message type contains in Msg.Header
-	Msg  adapterMessage `json:"pfcpMsg"`
-	Addr *net.UDPAddr   `json:"addr"`
+	Addr     *net.UDPAddr   `json:"addr"`
+	SmfIp    string         `json:"smfIp"`
+	Msg      adapterMessage `json:"pfcpMsg"`
+	UpNodeID types.NodeID   `json:"upNodeID"`
 }
 
 type PfcpHttpRsp struct {
-	Rsp []byte
 	Err error
+	Rsp []byte
 }
 
 type PfcpTxnChan chan PfcpHttpRsp

@@ -187,13 +187,20 @@ func HandlePfcpSessionDeletionResponse(msg message.Message) {
 
 func BuildPfcpAssociationResponse(nodeId *types.NodeID, seqNo uint32) (*message.AssociationSetupResponse, error) {
 	logger.AppLog.Debugf("building pfcp association response for upf [%v], seqNo [%v]", nodeId, seqNo)
-	if upf := config.GetUpfFromNodeId(nodeId); upf != nil {
-		lastAssociationRsp := upf.LastAssoRsp
-		logger.AppLog.Debugf("stored association response recovery timestamp: %v", lastAssociationRsp.RecoveryTimeStamp)
-		lastAssociationRsp.Header.SequenceNumber = seqNo
-		return &lastAssociationRsp, nil
+	upf := config.GetUpfFromNodeId(nodeId)
+	if upf == nil {
+		logger.AppLog.Errorf("upf [%v] not found", string(nodeId.NodeIdValue))
+		return nil, fmt.Errorf("upf not found: %v", string(nodeId.NodeIdValue))
 	}
 
-	logger.AppLog.Errorf("upf [%v] not found", string(nodeId.NodeIdValue))
-	return nil, fmt.Errorf("upf not found: %v", string(nodeId.NodeIdValue))
+	upf.UpfLock.RLock()
+	lastAssociationRsp := upf.LastAssoRsp
+	header := *lastAssociationRsp.Header
+	upf.UpfLock.RUnlock()
+
+	logger.AppLog.Debugf("stored association response recovery timestamp: %v", lastAssociationRsp.RecoveryTimeStamp)
+	// clone the header so we don't mutate the stored response shared with other callers
+	lastAssociationRsp.Header = &header
+	lastAssociationRsp.SequenceNumber = seqNo
+	return &lastAssociationRsp, nil
 }
