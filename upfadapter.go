@@ -8,6 +8,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"os"
 
@@ -43,6 +44,27 @@ func handler(w http.ResponseWriter, req *http.Request) {
 
 	logger.AppLog.Debugf("received msg type [%v], upf nodeId [%s], smfIp [%v], msg [%v]",
 		pfcpMessage.MessageType(), udpPodMsg.UpNodeID.NodeIdValue, udpPodMsg.SmfIp, udpPodMsg.Msg)
+
+	// Remember where the SMF is. A message the user-plane function originates arrives
+	// with no request of ours to answer, so this is the only address we can relay it to.
+	//
+	// The address is taken from the body rather than from the connection, and the mismatch
+	// is reported rather than refused. The SMF fills it with its own first non-loopback
+	// address, which is the peer address in an ordinary deployment -- but not necessarily
+	// one where the SMF is multi-homed or reached through a proxy, and refusing there would
+	// break the relay for a difference that is legitimate. A claim that does not match the
+	// peer is worth seeing, so it is logged once per change.
+	if host, _, splitErr := net.SplitHostPort(req.RemoteAddr); splitErr == nil &&
+		udpPodMsg.SmfIp != "" && udpPodMsg.SmfIp != host {
+		// Only when the claim changes. Every PFCP message the SMF sends arrives here, so a
+		// persistent mismatch would otherwise warn on each one.
+		if current := config.SmfAddr(); current == nil || current.IP.String() != udpPodMsg.SmfIp {
+			logger.AppLog.Warnf("message claims SMF address [%s] but arrived from [%s]; relaying to the claimed address",
+				udpPodMsg.SmfIp, host)
+		}
+	}
+
+	config.SetSmfAddr(udpPodMsg.SmfIp)
 
 	pfcpJsonRsp, err := pfcp.ForwardPfcpMsgToUpf(pfcpMessage, udpPodMsg.UpNodeID)
 	if err != nil {
