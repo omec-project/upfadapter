@@ -185,9 +185,11 @@ const (
 )
 
 type reportRelay struct {
+	// Ordered so the fields carrying pointers lead: govet's fieldalignment counts the leading
+	// pointer bytes, and time.Time holds one.
 	upfAddr  *net.UDPAddr
-	upfSeq   uint32
 	recorded time.Time
+	upfSeq   uint32
 }
 
 // SetSmfAddr records where the SMF talks to us from. Every SMF-initiated message
@@ -245,7 +247,11 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) uin
 	for held, relay := range reportRelays {
 		if now.Sub(relay.recorded) > reportRelayLifetime {
 			delete(reportRelays, held)
-			logger.CfgLog.Warnf("no response was relayed for session report seq[%d], forgetting it", relay.upfSeq)
+			// Both numbers, and the peer: the map is keyed by the adapter's own sequence while the
+			// user plane is waiting on its own, and several user planes can be waiting on the same
+			// one. Reporting only the user plane's number names an entry that cannot be looked up.
+			logger.CfgLog.Warnf("no response was relayed for session report from %v: adapter seq[%d], user plane seq[%d]; forgetting it",
+				relay.upfAddr, held, relay.upfSeq)
 		}
 	}
 
