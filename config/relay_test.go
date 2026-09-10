@@ -8,6 +8,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/omec-project/upfadapter/types"
 )
 
 // withSmfAddr isolates the package-level SMF address so ordering between tests cannot
@@ -177,5 +179,92 @@ func TestReportRelayForgetsEntriesTheSmfNeverAnswered(t *testing.T) {
 func TestTakeReportRelayUnknownSequence(t *testing.T) {
 	if addr, _ := TakeReportRelay(999999); addr != nil {
 		t.Errorf("TakeReportRelay(unknown) = %v, want nil", addr)
+	}
+}
+
+// isolateUpfAddrs empties the recorded user planes so ordering between tests cannot
+// decide their outcome.
+func isolateUpfAddrs(t *testing.T) {
+	t.Helper()
+
+	upfAddrMutex.Lock()
+	previous := upfAddrs
+	upfAddrs = make(map[string]struct{})
+	upfAddrMutex.Unlock()
+
+	t.Cleanup(func() {
+		upfAddrMutex.Lock()
+		upfAddrs = previous
+		upfAddrMutex.Unlock()
+	})
+}
+
+// Before the SMF has named any user plane there is nothing to relay for, and a report
+// from an unknown source must not be taken on trust.
+func TestNoUpfIsKnownBeforeTheSmfNamesOne(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	if IsKnownUpfAddr(net.ParseIP("10.42.0.184")) {
+		t.Error("IsKnownUpfAddr() = true with nothing recorded, want false")
+	}
+}
+
+func TestRecordUpfAddrByIP(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	RecordUpfAddr(types.NewNodeID("10.42.0.184"))
+
+	if !IsKnownUpfAddr(net.ParseIP("10.42.0.184")) {
+		t.Error("IsKnownUpfAddr() = false for the user plane the SMF named, want true")
+	}
+
+	// The peer address read off the socket is a 4-byte IPv4 where the node ID resolved to
+	// a 16-byte one; the two must still be the same user plane.
+	if !IsKnownUpfAddr(net.ParseIP("10.42.0.184").To4()) {
+		t.Error("IsKnownUpfAddr() = false for the same address in 4-byte form, want true")
+	}
+}
+
+// Anything else that can reach the port is refused, which is the whole point: N4 has no
+// transport authentication, so the SMF naming a user plane is the only thing that makes
+// it one.
+func TestIsKnownUpfAddrRefusesAnySourceTheSmfDidNotName(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	RecordUpfAddr(types.NewNodeID("10.42.0.184"))
+
+	if IsKnownUpfAddr(net.ParseIP("10.42.0.185")) {
+		t.Error("IsKnownUpfAddr() = true for a source the SMF never named, want false")
+	}
+
+	if IsKnownUpfAddr(nil) {
+		t.Error("IsKnownUpfAddr(nil) = true, want false")
+	}
+}
+
+// A user plane configured by name is matched by the address it actually sends from, not
+// by the name, because the peer address is all a report carries.
+func TestRecordUpfAddrResolvesAnFqdn(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	types.InsertDnsHostIp("upf.5gc.svc", net.ParseIP("10.42.0.190"))
+
+	RecordUpfAddr(types.NewNodeID("upf.5gc.svc"))
+
+	if !IsKnownUpfAddr(net.ParseIP("10.42.0.190")) {
+		t.Error("IsKnownUpfAddr() = false for the address an FQDN-configured user plane resolves to, want true")
+	}
+}
+
+// An unresolvable name yields IPv4zero, and recording that would admit an address no
+// real peer has. The value is driven in directly rather than through a name that does
+// not resolve, so the test does not depend on a DNS lookup failing.
+func TestRecordUpfAddrIgnoresAnUnspecifiedAddress(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	RecordUpfAddr(&types.NodeID{NodeIdType: types.NodeIdTypeIpv4Address, NodeIdValue: net.IPv4zero.To4()})
+
+	if IsKnownUpfAddr(net.IPv4zero) {
+		t.Error("IsKnownUpfAddr(0.0.0.0) = true, want false")
 	}
 }

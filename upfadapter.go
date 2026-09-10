@@ -66,6 +66,11 @@ func handler(w http.ResponseWriter, req *http.Request) {
 
 	config.SetSmfAddr(udpPodMsg.SmfIp)
 
+	// Remember the user plane too. A session report arrives on the UDP socket with no
+	// request of ours to match it against, so this is what tells a user plane the SMF
+	// actually talks to apart from anything else that can reach the port.
+	config.RecordUpfAddr(&udpPodMsg.UpNodeID)
+
 	pfcpJsonRsp, err := pfcp.ForwardPfcpMsgToUpf(pfcpMessage, udpPodMsg.UpNodeID)
 	if err != nil {
 		logger.AppLog.Errorf("error forwarding pfcp msg to UPF: %v", err)

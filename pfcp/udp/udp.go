@@ -6,7 +6,6 @@
 package udp
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -46,7 +45,9 @@ var Server *PfcpServer
 // answering, which is ordinary and not a read failure. It was previously compared by
 // message text, in a spelling the text never had, so every retransmission was logged as
 // an error -- unnoticed while no user-plane-originated request was handled at all.
-var ErrResendRequest = errors.New("receive resend PFCP request")
+// readPfcpMessage is its only source and returns it unwrapped, so callers compare it
+// directly.
+var ErrResendRequest = fmt.Errorf("receive resend PFCP request")
 
 var (
 	ServerStartTime time.Time
@@ -232,7 +233,7 @@ func Run(Dispatch func(message.Message, *net.UDPAddr)) {
 		for {
 			pfcpMessage, remoteAddr, err := readPfcpMessage()
 			if err != nil {
-				if errors.Is(err, ErrResendRequest) {
+				if err == ErrResendRequest {
 					logger.PfcpLog.Infoln(err)
 				} else {
 					logger.PfcpLog.Warnf("read PFCP error: %v", err)

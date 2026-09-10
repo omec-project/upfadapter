@@ -167,6 +167,9 @@ var (
 	smfAddrMutex sync.RWMutex
 	smfAddr      string
 
+	upfAddrMutex sync.RWMutex
+	upfAddrs     = make(map[string]struct{})
+
 	reportRelayMutex sync.Mutex
 	reportRelays     = make(map[uint32]reportRelay)
 	reportRelaySeq   uint32
@@ -226,6 +229,54 @@ func SmfAddr() *net.UDPAddr {
 	}
 
 	return &net.UDPAddr{IP: ip, Port: PfcpPort}
+}
+
+// RecordUpfAddr remembers a user-plane function the SMF has addressed through us, so a
+// message that user plane originates can be told apart from one anybody else sent.
+//
+// The set is learned from ordinary SMF traffic rather than taken from UpfCfg.UPFs. That
+// table is filled only on the association-setup path, and an adapter restart empties it
+// while the sessions it would guard stay established: the SMF is given the user plane's
+// own recovery timestamp on every heartbeat response, not ours, so it has no reason to
+// associate again and the table would stay empty for the life of the association. Every
+// message the SMF forwards names its user plane, so this set comes back within one
+// heartbeat instead -- the same way the SMF's own address does.
+func RecordUpfAddr(nodeId *types.NodeID) {
+	ip := nodeId.ResolveNodeIdToIp()
+	if ip == nil || ip.IsUnspecified() {
+		// An FQDN that does not resolve yields IPv4zero. Recording that would admit
+		// nothing useful and match no peer.
+		return
+	}
+
+	key := ip.String()
+
+	upfAddrMutex.Lock()
+	defer upfAddrMutex.Unlock()
+
+	if _, known := upfAddrs[key]; !known {
+		// The resolved address only: NodeIdValue is four raw octets for an IPv4 node ID,
+		// which prints as rubbish.
+		logger.CfgLog.Infof("the SMF addresses a user plane at [%s]; reports from it will be relayed", key)
+	}
+
+	upfAddrs[key] = struct{}{}
+}
+
+// IsKnownUpfAddr reports whether a peer is one of the user-plane functions the SMF has
+// addressed through us. Nothing else may have a message relayed on its behalf, or be
+// answered by us.
+func IsKnownUpfAddr(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+
+	upfAddrMutex.RLock()
+	defer upfAddrMutex.RUnlock()
+
+	_, known := upfAddrs[ip.String()]
+
+	return known
 }
 
 // RelayReportSequence allocates the sequence number the adapter uses toward the SMF for a

@@ -196,6 +196,19 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 		return
 	}
 
+	// Relay for the user planes the SMF has addressed through us, and answer those only.
+	// N4 carries no transport authentication, so without this the adapter relays a report
+	// for whatever can reach the port and -- because a report it cannot relay is rejected
+	// rather than dropped -- answers it too, holding a resend transaction, a timer and a
+	// never-reclaimed ConsumerTable entry per source address on its behalf. Dropping costs
+	// a legitimate peer nothing: a source the SMF has never named has no session here and
+	// so is holding no traffic to be told about. This runs before the rejection below so
+	// that the only peers ever answered are ones the SMF named.
+	if !config.IsKnownUpfAddr(upfAddr.IP) {
+		logger.PfcpLog.Warnf("session report request from [%v], which is not a user plane the SMF has addressed through us; dropping it", upfAddr)
+		return
+	}
+
 	upfSeq := report.Sequence()
 
 	smfAddr := config.SmfAddr()
