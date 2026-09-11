@@ -14,7 +14,7 @@ import (
 
 // withSmfAddr isolates the package-level SMF address so ordering between tests cannot
 // decide their outcome.
-func withSmfAddr(t *testing.T, value string) {
+func withSmfAddr(t *testing.T, value net.IP) {
 	t.Helper()
 
 	smfAddrMutex.Lock()
@@ -30,7 +30,7 @@ func withSmfAddr(t *testing.T, value string) {
 }
 
 func TestSmfAddrUnknownUntilAnSmfSpeaks(t *testing.T) {
-	withSmfAddr(t, "")
+	withSmfAddr(t, nil)
 
 	if addr := SmfAddr(); addr != nil {
 		t.Fatalf("SmfAddr() = %v, want nil before any SMF message", addr)
@@ -38,7 +38,7 @@ func TestSmfAddrUnknownUntilAnSmfSpeaks(t *testing.T) {
 }
 
 func TestSetSmfAddrRecordsWhereToRelay(t *testing.T) {
-	withSmfAddr(t, "")
+	withSmfAddr(t, nil)
 
 	SetSmfAddr("10.42.0.188")
 
@@ -55,7 +55,7 @@ func TestSetSmfAddrRecordsWhereToRelay(t *testing.T) {
 // An SMF-initiated message without the field must not erase an address we already have,
 // or one malformed request would stop every later report from being relayed.
 func TestSetSmfAddrIgnoresEmpty(t *testing.T) {
-	withSmfAddr(t, "10.42.0.188")
+	withSmfAddr(t, net.ParseIP("10.42.0.188"))
 
 	SetSmfAddr("")
 
@@ -64,20 +64,66 @@ func TestSetSmfAddrIgnoresEmpty(t *testing.T) {
 	}
 }
 
-func TestSmfAddrRejectsNonIP(t *testing.T) {
-	withSmfAddr(t, "upf-adapter.local")
+// The address is claimed in an unauthenticated request body. A claim that is not an IP
+// must be refused where it arrives: stored unparsed it erased an address that worked, and
+// every report was then rejected until the next SMF message happened to carry a good one.
+func TestSetSmfAddrRefusesAClaimThatIsNotAnIP(t *testing.T) {
+	withSmfAddr(t, net.ParseIP("10.42.0.188"))
+
+	SetSmfAddr("upf-adapter.local")
+
+	if addr := SmfAddr(); addr == nil || !addr.IP.Equal(net.ParseIP("10.42.0.188")) {
+		t.Errorf("SmfAddr() = %v, want the previously recorded address", addr)
+	}
+
+	withSmfAddr(t, nil)
+
+	SetSmfAddr("upf-adapter.local")
 
 	if addr := SmfAddr(); addr != nil {
-		t.Errorf("SmfAddr() = %v, want nil for a value that is not an IP", addr)
+		t.Errorf("SmfAddr() = %v, want nil for a claim that is not an IP", addr)
 	}
+}
+
+// The recorded address is handed out while the package keeps writing the field, so what
+// a caller gets must not be the stored slice itself.
+func TestSmfAddrReturnsACopy(t *testing.T) {
+	withSmfAddr(t, net.ParseIP("10.42.0.188"))
+
+	addr := SmfAddr()
+	addr.IP[len(addr.IP)-1] = 0
+
+	if again := SmfAddr(); again == nil || !again.IP.Equal(net.ParseIP("10.42.0.188")) {
+		t.Errorf("SmfAddr() = %v after a caller wrote to its address, want 10.42.0.188", again)
+	}
+}
+
+// withReportRelays isolates the relay table and the sequence counter, so a test that
+// leaves an entry behind -- or stops at a Fatalf before taking one -- cannot decide
+// another test's outcome.
+func withReportRelays(t *testing.T) {
+	t.Helper()
+
+	reportRelayMutex.Lock()
+	relays, seq := reportRelays, reportRelaySeq
+	reportRelays, reportRelaySeq = make(map[uint32]reportRelay), 0
+	reportRelayMutex.Unlock()
+
+	t.Cleanup(func() {
+		reportRelayMutex.Lock()
+		reportRelays, reportRelaySeq = relays, seq
+		reportRelayMutex.Unlock()
+	})
 }
 
 // A relayed report is renumbered into the adapter's own space, and the answer must carry
 // the number the user plane is waiting for -- not the adapter's.
 func TestRelayReportSequenceKeepsTheUpfsOwnNumber(t *testing.T) {
+	withReportRelays(t)
+
 	upfAddr := &net.UDPAddr{IP: net.ParseIP("10.42.0.184"), Port: PfcpPort}
 
-	relaySeq := RelayReportSequence(upfAddr, 4711, time.Now())
+	relaySeq, _ := RelayReportSequence(upfAddr, 4711, time.Now())
 	if relaySeq == 4711 {
 		t.Error("the report was relayed under the UPF's own sequence number, which shares a table with the SMF's")
 	}
@@ -105,13 +151,21 @@ func TestRelayReportSequenceKeepsTheUpfsOwnNumber(t *testing.T) {
 // Two user planes number their reports independently, so the same number arriving from
 // both must still resolve to the right peer.
 func TestRelayReportSequenceSeparatesTwoUpfsUsingTheSameNumber(t *testing.T) {
+	withReportRelays(t)
+
 	first := &net.UDPAddr{IP: net.ParseIP("10.42.0.184"), Port: PfcpPort}
 	second := &net.UDPAddr{IP: net.ParseIP("10.42.0.185"), Port: PfcpPort}
 
 	now := time.Now()
 
-	firstRelay := RelayReportSequence(first, 1, now)
-	secondRelay := RelayReportSequence(second, 1, now)
+	firstRelay, firstFresh := RelayReportSequence(first, 1, now)
+	secondRelay, secondFresh := RelayReportSequence(second, 1, now)
+
+	// Both are reports in their own right. Recognising a retransmission by its sequence
+	// number alone would make the second one the first one arriving twice.
+	if !firstFresh || !secondFresh {
+		t.Fatalf("reports from two user planes were taken for one: fresh = %v and %v, want both true", firstFresh, secondFresh)
+	}
 
 	if firstRelay == secondRelay {
 		t.Fatalf("both reports were relayed as seq[%d]; one origin has been lost", firstRelay)
@@ -133,23 +187,120 @@ func TestRelayReportSequenceSeparatesTwoUpfsUsingTheSameNumber(t *testing.T) {
 	}
 }
 
+// A user-plane function retransmits a request it has not been answered. Until the answer
+// exists there is no response transaction holding the report, so nothing else recognises
+// the copy: relaying it as a report of its own raises a second downlink data notification
+// for traffic the SMF is already being told about.
+func TestRelayReportSequenceRecognisesARetransmission(t *testing.T) {
+	withReportRelays(t)
+
+	upfAddr := &net.UDPAddr{IP: net.ParseIP("10.42.0.187"), Port: PfcpPort}
+
+	now := time.Now()
+
+	first, fresh := RelayReportSequence(upfAddr, 7, now)
+	if !fresh {
+		t.Fatal("the first report was taken for a retransmission")
+	}
+
+	again, fresh := RelayReportSequence(upfAddr, 7, now.Add(3*time.Second))
+	if fresh {
+		t.Error("a retransmission was relayed as a report of its own")
+	}
+
+	if again != first {
+		t.Errorf("retransmission resolved to seq[%d], want the outstanding seq[%d]", again, first)
+	}
+
+	// The next report is numbered as though the retransmission had never arrived, which is
+	// what says no second entry was made for it.
+	other, fresh := RelayReportSequence(upfAddr, 8, now)
+	if !fresh || other != first+1 {
+		t.Errorf("the next report = seq[%d] (fresh = %v), want seq[%d]: the retransmission consumed a sequence number",
+			other, fresh, first+1)
+	}
+
+	TakeReportRelay(other)
+
+	if addr, _ := TakeReportRelay(first); addr == nil {
+		t.Fatalf("TakeReportRelay(%d) = nil, want the outstanding relay", first)
+	}
+
+	// Once the exchange is answered and taken, the same number is a new report again --
+	// the user plane's counter comes round, and this must not make it unreachable.
+	repeated, fresh := RelayReportSequence(upfAddr, 7, now)
+	if !fresh {
+		t.Error("a report reusing the number of an exchange already answered was refused as a retransmission")
+	}
+
+	TakeReportRelay(repeated)
+}
+
+// A peer is an address and a port -- that is the identity every other transaction in the
+// adapter is keyed by -- so two user planes behind one address are two peers, and a report
+// from each is a report of its own.
+func TestRelayReportSequenceSeparatesTwoPortsAtOneAddress(t *testing.T) {
+	withReportRelays(t)
+
+	first := &net.UDPAddr{IP: net.ParseIP("10.42.0.189"), Port: PfcpPort}
+	second := &net.UDPAddr{IP: net.ParseIP("10.42.0.189"), Port: PfcpPort + 1}
+
+	now := time.Now()
+
+	firstRelay, firstFresh := RelayReportSequence(first, 1, now)
+
+	secondRelay, secondFresh := RelayReportSequence(second, 1, now)
+	if !firstFresh || !secondFresh {
+		t.Fatalf("reports from two ports were taken for one: fresh = %v and %v, want both true", firstFresh, secondFresh)
+	}
+
+	if firstRelay == secondRelay {
+		t.Fatalf("both reports were relayed as seq[%d]; one origin has been lost", firstRelay)
+	}
+
+	addr, _ := TakeReportRelay(secondRelay)
+	if addr == nil || addr.Port != second.Port {
+		t.Errorf("second report resolved to %v, want %v", addr, second)
+	}
+
+	TakeReportRelay(firstRelay)
+}
+
+// An entry past its lifetime is forgotten, not read as a relay still in flight: the user
+// plane would otherwise never have that report relayed at all.
+func TestRelayReportSequenceRelaysAgainOnceTheOutstandingEntryExpired(t *testing.T) {
+	withReportRelays(t)
+
+	upfAddr := &net.UDPAddr{IP: net.ParseIP("10.42.0.188"), Port: PfcpPort}
+
+	now := time.Now()
+
+	stale, _ := RelayReportSequence(upfAddr, 11, now.Add(-2*reportRelayLifetime))
+
+	relaySeq, fresh := RelayReportSequence(upfAddr, 11, now)
+	if !fresh {
+		t.Error("a report whose outstanding entry had expired was taken for a retransmission")
+	}
+
+	if relaySeq == stale {
+		t.Errorf("the expired entry was handed back as seq[%d]", stale)
+	}
+
+	TakeReportRelay(relaySeq)
+}
+
 // Sequence numbers are three octets on the wire, so the counter has to come back round
 // inside the adapter's own range rather than overflow into the SMF's.
 func TestRelayReportSequenceWrapsWithinItsOwnRange(t *testing.T) {
+	withReportRelays(t)
+
 	upfAddr := &net.UDPAddr{IP: net.ParseIP("10.42.0.184"), Port: PfcpPort}
 
 	reportRelayMutex.Lock()
-	previous := reportRelaySeq
 	reportRelaySeq = relaySequenceCeil
 	reportRelayMutex.Unlock()
 
-	t.Cleanup(func() {
-		reportRelayMutex.Lock()
-		reportRelaySeq = previous
-		reportRelayMutex.Unlock()
-	})
-
-	relaySeq := RelayReportSequence(upfAddr, 7, time.Now())
+	relaySeq, _ := RelayReportSequence(upfAddr, 7, time.Now())
 	if relaySeq != relaySequenceFloor {
 		t.Errorf("sequence after the ceiling = %#x, want %#x", relaySeq, relaySequenceFloor)
 	}
@@ -159,13 +310,15 @@ func TestRelayReportSequenceWrapsWithinItsOwnRange(t *testing.T) {
 
 // An SMF that never answers must not cost an entry for the life of the process.
 func TestReportRelayForgetsEntriesTheSmfNeverAnswered(t *testing.T) {
+	withReportRelays(t)
+
 	stale := &net.UDPAddr{IP: net.ParseIP("10.42.0.184"), Port: PfcpPort}
 	fresh := &net.UDPAddr{IP: net.ParseIP("10.42.0.185"), Port: PfcpPort}
 
 	now := time.Now()
 
-	staleRelay := RelayReportSequence(stale, 1, now.Add(-2*reportRelayLifetime))
-	freshRelay := RelayReportSequence(fresh, 2, now)
+	staleRelay, _ := RelayReportSequence(stale, 1, now.Add(-2*reportRelayLifetime))
+	freshRelay, _ := RelayReportSequence(fresh, 2, now)
 
 	if addr, _ := TakeReportRelay(staleRelay); addr != nil {
 		t.Errorf("TakeReportRelay(%d) = %v, want nil for an entry past its lifetime", staleRelay, addr)
@@ -177,6 +330,8 @@ func TestReportRelayForgetsEntriesTheSmfNeverAnswered(t *testing.T) {
 }
 
 func TestTakeReportRelayUnknownSequence(t *testing.T) {
+	withReportRelays(t)
+
 	if addr, _ := TakeReportRelay(999999); addr != nil {
 		t.Errorf("TakeReportRelay(unknown) = %v, want nil", addr)
 	}

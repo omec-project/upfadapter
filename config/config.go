@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -165,7 +166,7 @@ func ActivateUpfNode(nodeId *types.NodeID) *UPNode {
 
 var (
 	smfAddrMutex sync.RWMutex
-	smfAddr      string
+	smfAddr      net.IP
 
 	upfAddrMutex sync.RWMutex
 	upfAddrs     = make(map[string]struct{})
@@ -198,19 +199,30 @@ type reportRelay struct {
 // SetSmfAddr records where the SMF talks to us from. Every SMF-initiated message
 // carries it, and it is the only way the adapter can relay a message the user-plane
 // function originates: those arrive with no request of ours to answer.
+//
+// A claim that is not an IP is refused, and what is already recorded kept. The field
+// comes from an unauthenticated request body, and storing it unparsed meant a single
+// malformed claim erased a working address -- every report was then rejected until the
+// next SMF message happened to carry a good one.
 func SetSmfAddr(ip string) {
 	if ip == "" {
+		return
+	}
+
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		logger.CfgLog.Errorf("ignoring claimed SMF address [%s]: not an IP", ip)
 		return
 	}
 
 	smfAddrMutex.Lock()
 	defer smfAddrMutex.Unlock()
 
-	if smfAddr != ip {
-		logger.CfgLog.Infof("SMF address for relayed messages is now [%s]", ip)
+	if !smfAddr.Equal(parsed) {
+		logger.CfgLog.Infof("SMF address for relayed messages is now [%s]", parsed)
 	}
 
-	smfAddr = ip
+	smfAddr = parsed
 }
 
 // SmfAddr returns the recorded SMF address, or nil if no SMF has spoken to us yet.
@@ -218,17 +230,13 @@ func SmfAddr() *net.UDPAddr {
 	smfAddrMutex.RLock()
 	defer smfAddrMutex.RUnlock()
 
-	if smfAddr == "" {
+	if smfAddr == nil {
 		return nil
 	}
 
-	ip := net.ParseIP(smfAddr)
-	if ip == nil {
-		logger.CfgLog.Errorf("recorded SMF address [%s] is not an IP", smfAddr)
-		return nil
-	}
-
-	return &net.UDPAddr{IP: ip, Port: PfcpPort}
+	// A copy: net.IP is a slice, and this one is handed to every caller while the
+	// package keeps writing the field.
+	return &net.UDPAddr{IP: slices.Clone(smfAddr), Port: PfcpPort}
 }
 
 // RecordUpfAddr remembers a user-plane function the SMF has addressed through us, so a
@@ -291,10 +299,25 @@ func IsKnownUpfAddr(ip net.IP) bool {
 // are independent of each other, two reports collide directly.
 //
 // Entries the SMF never answers are dropped once they are older than reportRelayLifetime.
-func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) uint32 {
+//
+// fresh is false when this user plane already has a report outstanding under this
+// sequence number: that is a retransmission, and the relay already in flight answers it.
+// Nothing else absorbs those. Answering a report creates a response transaction that
+// holds it for the resend window, so a retransmission arriving *after* the answer is met
+// with the answer again -- but until then the report has no transaction here at all, and
+// every copy would be renumbered and forwarded separately, raising a downlink data
+// notification each time for traffic the SMF is already being told about.
+func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (relaySeq uint32, fresh bool) {
 	reportRelayMutex.Lock()
 	defer reportRelayMutex.Unlock()
 
+	var (
+		outstanding uint32
+		relaying    bool
+	)
+
+	// The sweep walks the whole map already, so recognising a retransmission rides along
+	// with it rather than costing an index of its own.
 	for held, relay := range reportRelays {
 		if now.Sub(relay.recorded) > reportRelayLifetime {
 			delete(reportRelays, held)
@@ -303,7 +326,17 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) uin
 			// one. Reporting only the user plane's number names an entry that cannot be looked up.
 			logger.CfgLog.Warnf("no response was relayed for session report from %v: adapter seq[%d], user plane seq[%d]; forgetting it",
 				relay.upfAddr, held, relay.upfSeq)
+
+			continue
 		}
+
+		if relay.upfSeq == upfSeq && relay.upfAddr.IP.Equal(upfAddr.IP) && relay.upfAddr.Port == upfAddr.Port {
+			outstanding, relaying = held, true
+		}
+	}
+
+	if relaying {
+		return outstanding, false
 	}
 
 	if reportRelaySeq < relaySequenceFloor || reportRelaySeq >= relaySequenceCeil {
@@ -314,7 +347,7 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) uin
 
 	reportRelays[reportRelaySeq] = reportRelay{upfAddr: upfAddr, upfSeq: upfSeq, recorded: now}
 
-	return reportRelaySeq
+	return reportRelaySeq, true
 }
 
 // TakeReportRelay returns and forgets where a relayed report came from, together with the

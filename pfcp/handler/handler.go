@@ -224,7 +224,18 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 
 	// Renumber into the adapter's own sequence space before relaying; the UPF's number
 	// goes back on the response. See config.RelayReportSequence.
-	relaySeq := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+	relaySeq, fresh := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+	if !fresh {
+		// A retransmission of a report still being relayed. Relaying it again would raise a
+		// second downlink data notification for traffic the SMF is already being told about;
+		// the relay in flight answers this copy too, and the SMF gets the adapter's own
+		// retransmissions meanwhile.
+		logger.PfcpLog.Infof("session report seq[%d] from UPF [%v] is already being relayed as seq[%d]; not relaying it again",
+			upfSeq, upfAddr, relaySeq)
+
+		return
+	}
+
 	report.SetSequenceNumber(relaySeq)
 
 	// If the SMF never answers, tell the user-plane function so. Its own retransmissions
