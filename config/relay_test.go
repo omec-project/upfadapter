@@ -221,19 +221,26 @@ func TestRelayReportSequenceRecognisesARetransmission(t *testing.T) {
 	}
 
 	TakeReportRelay(other)
+	ForgetReportRelay(other)
 
 	if addr, _ := TakeReportRelay(first); addr == nil {
 		t.Fatalf("TakeReportRelay(%d) = nil, want the outstanding relay", first)
 	}
 
-	// Once the exchange is answered and taken, the same number is a new report again --
-	// the user plane's counter comes round, and this must not make it unreachable.
+	ForgetReportRelay(first)
+
+	// Once the answer has been sent and the exchange forgotten, the same number is a new
+	// report again -- the user plane's counter comes round, and this must not make it
+	// unreachable. Taking alone does not end it: see
+	// TestTakeReportRelayKeepsTheEntryUntilItIsForgotten for what the entry is still doing
+	// between the two.
 	repeated, fresh := RelayReportSequence(upfAddr, 7, now)
 	if !fresh {
 		t.Error("a report reusing the number of an exchange already answered was refused as a retransmission")
 	}
 
 	TakeReportRelay(repeated)
+	ForgetReportRelay(repeated)
 }
 
 // A peer is an address and a port -- that is the identity every other transaction in the
@@ -338,18 +345,21 @@ func TestTakeReportRelayUnknownSequence(t *testing.T) {
 }
 
 // isolateUpfAddrs empties the recorded user planes so ordering between tests cannot
-// decide their outcome.
+// decide their outcome. Both directions of the index are replaced: leaving the reverse one
+// behind would let a node id recorded by an earlier test decide where this one thinks it
+// moved from.
 func isolateUpfAddrs(t *testing.T) {
 	t.Helper()
 
 	upfAddrMutex.Lock()
-	previous := upfAddrs
-	upfAddrs = make(map[string]struct{})
+	previousAddrs, previousNodes := upfAddrs, upfNodeAddrs
+	upfAddrs = make(map[string]map[string]struct{})
+	upfNodeAddrs = make(map[string]string)
 	upfAddrMutex.Unlock()
 
 	t.Cleanup(func() {
 		upfAddrMutex.Lock()
-		upfAddrs = previous
+		upfAddrs, upfNodeAddrs = previousAddrs, previousNodes
 		upfAddrMutex.Unlock()
 	})
 }
@@ -421,5 +431,114 @@ func TestRecordUpfAddrIgnoresAnUnspecifiedAddress(t *testing.T) {
 
 	if IsKnownUpfAddr(net.IPv4zero) {
 		t.Error("IsKnownUpfAddr(0.0.0.0) = true, want false")
+	}
+}
+
+// 0.0.0.0 and :: are IP addresses and not destinations. A claim carrying one used to be
+// stored like any other, and every report relayed afterwards went to an address that
+// answers nothing -- until some later SMF message happened to carry a usable one.
+func TestSetSmfAddrRefusesTheUnspecifiedAddress(t *testing.T) {
+	working := net.ParseIP("10.10.0.5")
+
+	for _, claim := range []string{"0.0.0.0", "::"} {
+		withSmfAddr(t, working)
+
+		SetSmfAddr(claim)
+
+		addr := SmfAddr()
+		if addr == nil || !addr.IP.Equal(working) {
+			t.Errorf("after a claimed SMF address of %q, SmfAddr() = %v, want the working address %v",
+				claim, addr, working)
+		}
+	}
+}
+
+// A user plane reached by name can move: the pod comes back at another address, and the
+// name now resolves there. The address it left must stop authorising reports, or an
+// unrelated peer that takes that address over is relayed for as though the SMF had named
+// it -- and the set grows for the life of the process.
+func TestRecordUpfAddrForgetsTheAddressANodeLeft(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	types.InsertDnsHostIp("moving.5gc.svc", net.ParseIP("10.42.0.200"))
+	RecordUpfAddr(types.NewNodeID("moving.5gc.svc"))
+
+	types.InsertDnsHostIp("moving.5gc.svc", net.ParseIP("10.42.0.201"))
+	RecordUpfAddr(types.NewNodeID("moving.5gc.svc"))
+
+	if IsKnownUpfAddr(net.ParseIP("10.42.0.200")) {
+		t.Error("IsKnownUpfAddr() = true for the address the user plane left, want false")
+	}
+
+	if !IsKnownUpfAddr(net.ParseIP("10.42.0.201")) {
+		t.Error("IsKnownUpfAddr() = false for the address the user plane moved to, want true")
+	}
+}
+
+// One address can carry two identities -- the SMF may name the same user plane by FQDN in
+// one message and by IP in another -- so an address is forgotten only once nothing is left
+// at it. Forgetting on the first move would revoke a peer that is still there.
+func TestRecordUpfAddrKeepsAnAddressAnotherIdentityStillUses(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	shared := net.ParseIP("10.42.0.210")
+
+	types.InsertDnsHostIp("shared.5gc.svc", shared)
+	RecordUpfAddr(types.NewNodeID("shared.5gc.svc"))
+	RecordUpfAddr(types.NewNodeID("10.42.0.210"))
+
+	types.InsertDnsHostIp("shared.5gc.svc", net.ParseIP("10.42.0.211"))
+	RecordUpfAddr(types.NewNodeID("shared.5gc.svc"))
+
+	if !IsKnownUpfAddr(shared) {
+		t.Error("IsKnownUpfAddr() = false for an address the SMF still names by IP, want true")
+	}
+}
+
+// Answering a report does not end the adapter's need to recognise copies of it. The
+// response transaction that absorbs them exists only once the answer has been sent, and
+// messages are handled on their own goroutines, so an entry deleted at the moment of
+// taking leaves a window in which a retransmission is relayed a second time -- a second
+// downlink data notification, and a second page.
+func TestTakeReportRelayKeepsTheEntryUntilItIsForgotten(t *testing.T) {
+	upfAddr := &net.UDPAddr{IP: net.ParseIP("10.42.0.220"), Port: PfcpPort}
+	now := time.Now()
+
+	relaySeq, fresh := RelayReportSequence(upfAddr, 7, now)
+	if !fresh {
+		t.Fatalf("precondition: the first relay of a report must be fresh")
+	}
+
+	if addr, _ := TakeReportRelay(relaySeq); addr == nil {
+		t.Fatalf("TakeReportRelay(%d) = nil, want the origin of the report", relaySeq)
+	}
+
+	if _, fresh := RelayReportSequence(upfAddr, 7, now); fresh {
+		t.Error("a retransmission arriving while the answer is being sent was treated as a new report; " +
+			"it would be relayed again and raise a second notification")
+	}
+
+	ForgetReportRelay(relaySeq)
+
+	if _, fresh := RelayReportSequence(upfAddr, 7, now); !fresh {
+		t.Error("a report arriving after the exchange was forgotten was not treated as new")
+	}
+}
+
+// The SMF's answer and the give-up path both end the same exchange. Only one of them may
+// answer the user plane, so the second taker is told there is nothing to take.
+func TestTakeReportRelayIsTakeOnce(t *testing.T) {
+	upfAddr := &net.UDPAddr{IP: net.ParseIP("10.42.0.221"), Port: PfcpPort}
+
+	relaySeq, _ := RelayReportSequence(upfAddr, 9, time.Now())
+	t.Cleanup(func() { ForgetReportRelay(relaySeq) })
+
+	if addr, _ := TakeReportRelay(relaySeq); addr == nil {
+		t.Fatalf("precondition: the first take must return the origin")
+	}
+
+	if addr, _ := TakeReportRelay(relaySeq); addr != nil {
+		t.Errorf("TakeReportRelay(%d) = %v on the second take, want nil: both paths would answer the same report",
+			relaySeq, addr)
 	}
 }

@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -15,6 +16,11 @@ import (
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 )
+
+// relaySendAttempts bounds how many sequence numbers a single report may try before it is
+// rejected. Each retry costs one map insertion, and a peer numbering requests fast enough to
+// take several of the adapter's numbers in a row is not a peer more attempts would help.
+const relaySendAttempts = 4
 
 func HandlePfcpSendError(msg message.Message, pfcpErr error) {
 	msgType := msg.MessageType()
@@ -222,22 +228,6 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 		return
 	}
 
-	// Renumber into the adapter's own sequence space before relaying; the UPF's number
-	// goes back on the response. See config.RelayReportSequence.
-	relaySeq, fresh := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
-	if !fresh {
-		// A retransmission of a report still being relayed. Relaying it again would raise a
-		// second downlink data notification for traffic the SMF is already being told about;
-		// the relay in flight answers this copy too, and the SMF gets the adapter's own
-		// retransmissions meanwhile.
-		logger.PfcpLog.Infof("session report seq[%d] from UPF [%v] is already being relayed as seq[%d]; not relaying it again",
-			upfSeq, upfAddr, relaySeq)
-
-		return
-	}
-
-	report.SetSequenceNumber(relaySeq)
-
 	// If the SMF never answers, tell the user-plane function so. Its own retransmissions
 	// would otherwise be the only thing that ends the wait, and TS 29.244 expects every
 	// request to be answered. TakeReportRelay is take-once, so this and the response path
@@ -247,21 +237,62 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 		logger.PfcpLog.Errorf("relayed session report seq[%d] was not answered by the SMF: %v",
 			sent.Sequence(), sendErr)
 
+		// Forgotten only by the path that claimed it. Claiming can fail because the SMF's
+		// answer arrived first and is still being sent, and dropping the entry from here
+		// would reopen the window that entry is holding shut.
 		if addr, seq := config.TakeReportRelay(sent.Sequence()); addr != nil {
 			rejectSessionReport(seid, seq, addr)
+			config.ForgetReportRelay(sent.Sequence())
 		}
 	}}
 
-	if err := udp.SendPfcp(report, smfAddr, eventData); err != nil {
+	// Renumber into the adapter's own sequence space before relaying; the UPF's number
+	// goes back on the response. See config.RelayReportSequence.
+	for attempt := 1; attempt <= relaySendAttempts; attempt++ {
+		relaySeq, fresh := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+		if !fresh {
+			// A retransmission of a report still being relayed. Relaying it again would raise a
+			// second downlink data notification for traffic the SMF is already being told about;
+			// the relay in flight answers this copy too, and the SMF gets the adapter's own
+			// retransmissions meanwhile.
+			logger.PfcpLog.Infof("session report seq[%d] from UPF [%v] is already being relayed as seq[%d]; not relaying it again",
+				upfSeq, upfAddr, relaySeq)
+
+			return
+		}
+
+		report.SetSequenceNumber(relaySeq)
+
+		err := udp.SendPfcp(report, smfAddr, eventData)
+		if err == nil {
+			logger.PfcpLog.Infof("relayed session report seq[%d] from UPF [%v] to SMF [%v] as seq[%d]",
+				upfSeq, upfAddr, smfAddr, relaySeq)
+
+			return
+		}
+
+		config.ForgetReportRelay(relaySeq)
+
+		if errors.Is(err, udp.ErrDuplicateSequence) {
+			// A request the SMF numbered is in flight under this number: its counter has
+			// reached the half the adapter allocates from, which the adapter cannot see and
+			// must not depend on. The next number is a free one, so the report is relayed
+			// rather than rejected for a coincidence.
+			logger.PfcpLog.Warnf("relay sequence [%d] for session report seq[%d] from UPF [%v] is already in flight; trying the next one",
+				relaySeq, upfSeq, upfAddr)
+
+			continue
+		}
+
 		logger.PfcpLog.Errorf("failed to relay session report request to SMF [%v]: %v", smfAddr, err)
-		config.TakeReportRelay(relaySeq)
 		rejectSessionReport(seid, upfSeq, upfAddr)
 
 		return
 	}
 
-	logger.PfcpLog.Infof("relayed session report seq[%d] from UPF [%v] to SMF [%v] as seq[%d]",
-		upfSeq, upfAddr, smfAddr, relaySeq)
+	logger.PfcpLog.Errorf("no free sequence number for session report seq[%d] from UPF [%v] in %d attempts; rejecting it",
+		upfSeq, upfAddr, relaySendAttempts)
+	rejectSessionReport(seid, upfSeq, upfAddr)
 }
 
 // HandlePfcpSessionReportResponse returns the SMF's answer to the user-plane function
@@ -282,6 +313,11 @@ func HandlePfcpSessionReportResponse(msg message.Message) {
 			relaySeq)
 		return
 	}
+
+	// Only once the answer is on its way: sending it creates the response transaction that
+	// absorbs further copies of the report, and until that exists this entry is the only
+	// thing standing between a retransmission and a second relay.
+	defer config.ForgetReportRelay(relaySeq)
 
 	// The user-plane function is waiting for its own sequence number, not ours.
 	response.SetSequenceNumber(upfSeq)

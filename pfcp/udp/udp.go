@@ -6,6 +6,7 @@
 package udp
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -49,6 +50,14 @@ var Server *PfcpServer
 // directly.
 var ErrResendRequest = fmt.Errorf("receive resend PFCP request")
 
+// ErrDuplicateSequence reports that a request could not be sent because one is already in
+// flight under the same sequence number. Requests the adapter sends share a single table,
+// keyed by this socket's own address, so a number the SMF chose and one the adapter chose
+// can meet there. A caller that owns its numbering can answer this by trying the next one;
+// callers relaying a peer's number cannot, and the distinction is only visible if the
+// reason is.
+var ErrDuplicateSequence = errors.New("duplicate sequence number")
+
 var (
 	ServerStartTime time.Time
 	CPNodeID        *types.NodeID
@@ -79,7 +88,7 @@ func PutTransaction(tx *Transaction) error {
 	if _, exist := txTable.Load(tx.SequenceNumber); !exist {
 		txTable.Store(tx.SequenceNumber, tx)
 	} else {
-		return fmt.Errorf("insert tx error: duplicate sequence number %d", tx.SequenceNumber)
+		return fmt.Errorf("insert tx error: %w %d", ErrDuplicateSequence, tx.SequenceNumber)
 	}
 	return nil
 }

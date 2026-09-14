@@ -5,6 +5,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"os"
 	"slices"
@@ -169,7 +170,12 @@ var (
 	smfAddr      net.IP
 
 	upfAddrMutex sync.RWMutex
-	upfAddrs     = make(map[string]struct{})
+	// upfAddrs maps a user plane's address to the node identities currently reachable at
+	// it, and upfNodeAddrs is the reverse. Two identities can share one address -- the SMF
+	// may name the same user plane by FQDN in one message and by IP in another -- so an
+	// address stops being authorised only once no identity is left at it.
+	upfAddrs     = make(map[string]map[string]struct{})
+	upfNodeAddrs = make(map[string]string)
 
 	reportRelayMutex sync.Mutex
 	reportRelays     = make(map[uint32]reportRelay)
@@ -182,8 +188,12 @@ const (
 	reportRelayLifetime = 30 * time.Second
 
 	// relaySequenceFloor is where the adapter's own sequence numbers start. Sequence
-	// numbers are three octets, and the SMF counts up from zero, so counting down from the
-	// top keeps the two apart for the life of any real deployment.
+	// numbers are three octets and the SMF counts up from zero, so starting at the halfway
+	// point keeps the two apart in an ordinary deployment -- but only that. The SMF's
+	// counter reaches this half after enough messages, and nothing here can see its state,
+	// so the separation is a convention and not isolation. What makes a collision harmless
+	// is that the relay is retried under the next number when the transaction table refuses
+	// one already in flight; see udp.ErrDuplicateSequence.
 	relaySequenceFloor = 0x800000
 	relaySequenceCeil  = 0xFFFFFF
 )
@@ -194,6 +204,11 @@ type reportRelay struct {
 	upfAddr  *net.UDPAddr
 	recorded time.Time
 	upfSeq   uint32
+	// answered marks the entry as claimed by whichever path is returning an answer to the
+	// user plane, while leaving it in the map. It is what keeps the two apart: only the
+	// first taker acts, and the entry goes on absorbing retransmissions until that path
+	// has finished.
+	answered bool
 }
 
 // SetSmfAddr records where the SMF talks to us from. Every SMF-initiated message
@@ -212,6 +227,15 @@ func SetSmfAddr(ip string) {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		logger.CfgLog.Errorf("ignoring claimed SMF address [%s]: not an IP", ip)
+		return
+	}
+
+	// 0.0.0.0 and :: parse, and neither is a destination: relayed reports sent there go
+	// nowhere and time out. Refusing keeps a working address rather than letting one
+	// claim carrying an unspecified value erase it -- the same reason a claim that is not
+	// an IP is refused, and the same test RecordUpfAddr applies to a user plane.
+	if parsed.IsUnspecified() {
+		logger.CfgLog.Errorf("ignoring claimed SMF address [%s]: the unspecified address is not a destination", ip)
 		return
 	}
 
@@ -258,17 +282,50 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 	}
 
 	key := ip.String()
+	node := nodeKey(nodeId)
 
 	upfAddrMutex.Lock()
 	defer upfAddrMutex.Unlock()
+
+	// A node that moved stops authorising the address it left. Without this the set only
+	// ever grows: a user plane reached through a name, or one that came back on a new
+	// address, leaves its old address authorised for the life of the process, and reports
+	// from whatever occupies that address next are relayed as if the SMF had named it.
+	if previous, moved := upfNodeAddrs[node]; moved && previous != key {
+		forgetUpfAddrLocked(node, previous)
+	}
 
 	if _, known := upfAddrs[key]; !known {
 		// The resolved address only: NodeIdValue is four raw octets for an IPv4 node ID,
 		// which prints as rubbish.
 		logger.CfgLog.Infof("the SMF addresses a user plane at [%s]; reports from it will be relayed", key)
+		upfAddrs[key] = make(map[string]struct{})
 	}
 
-	upfAddrs[key] = struct{}{}
+	upfAddrs[key][node] = struct{}{}
+	upfNodeAddrs[node] = key
+}
+
+// nodeKey identifies one user plane across address changes. The type is part of it because
+// the same octets mean different things under different node id types.
+func nodeKey(nodeId *types.NodeID) string {
+	return fmt.Sprintf("%d/%s", nodeId.NodeIdType, nodeId.NodeIdValue)
+}
+
+// forgetUpfAddrLocked drops one identity from an address and the address with it once no
+// identity is left there. Callers hold upfAddrMutex.
+func forgetUpfAddrLocked(node, addr string) {
+	nodes, known := upfAddrs[addr]
+	if !known {
+		return
+	}
+
+	delete(nodes, node)
+
+	if len(nodes) == 0 {
+		delete(upfAddrs, addr)
+		logger.CfgLog.Infof("no user plane the SMF has named is at [%s] any more; reports from it will not be relayed", addr)
+	}
 }
 
 // IsKnownUpfAddr reports whether a peer is one of the user-plane functions the SMF has
@@ -350,21 +407,39 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (re
 	return reportRelaySeq, true
 }
 
-// TakeReportRelay returns and forgets where a relayed report came from, together with the
-// sequence number that user-plane function gave it. A zero address means the response
-// matches no report the adapter relayed.
+// TakeReportRelay claims a relayed report for answering and returns where it came from,
+// together with the sequence number that user-plane function gave it. A nil address means
+// the report matches nothing the adapter is relaying, or that another path has already
+// claimed it -- the SMF's answer and the give-up path both end the same exchange, and only
+// one of them may answer it.
+//
+// The entry is kept, not deleted, until ForgetReportRelay. Deleting here left a window in
+// which a retransmitted report matched neither an entry here nor a response transaction --
+// which is only created once the answer is sent -- and was therefore relayed a second time,
+// raising a second downlink data notification and a second page. Messages are dispatched on
+// their own goroutines, so that window is reachable.
 func TakeReportRelay(relaySeq uint32) (*net.UDPAddr, uint32) {
 	reportRelayMutex.Lock()
 	defer reportRelayMutex.Unlock()
 
 	relay, ok := reportRelays[relaySeq]
-	if !ok {
+	if !ok || relay.answered {
 		return nil, 0
 	}
 
-	delete(reportRelays, relaySeq)
+	relay.answered = true
+	reportRelays[relaySeq] = relay
 
 	return relay.upfAddr, relay.upfSeq
+}
+
+// ForgetReportRelay drops the entry once the answer to that report has been sent, or once
+// the relay it was holding turned out never to have gone out at all.
+func ForgetReportRelay(relaySeq uint32) {
+	reportRelayMutex.Lock()
+	defer reportRelayMutex.Unlock()
+
+	delete(reportRelays, relaySeq)
 }
 
 func InsertUpfPfcpTxn(seq uint32, pfcpTxnChan PfcpTxnChan) {
