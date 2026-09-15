@@ -387,8 +387,15 @@ func forgetUpfAddrLocked(node, addr string) {
 }
 
 // IsKnownUpfAddr reports whether a peer is one of the user-plane functions the SMF has
-// addressed through us. Nothing else may have a message relayed on its behalf, or be
-// answered by us.
+// addressed through us, and has named recently enough. Nothing else may have a message
+// relayed on its behalf, or be answered by us.
+//
+// The age is tested here rather than left to the sweep, because the sweep runs on SMF traffic
+// and this question is asked on user-plane traffic. An SMF that has gone quiet is exactly the
+// case the lifetime exists for, and it is also the case in which nothing would sweep: reports
+// would go on being relayed for an address whose user plane the SMF stopped naming half an hour
+// ago. Removing the entry still waits for the next SMF message; this only declines to answer on
+// its behalf in the meantime.
 func IsKnownUpfAddr(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -397,9 +404,15 @@ func IsKnownUpfAddr(ip net.IP) bool {
 	upfAddrMutex.RLock()
 	defer upfAddrMutex.RUnlock()
 
-	_, known := upfAddrs[ip.String()]
+	now := time.Now()
 
-	return known
+	for node := range upfAddrs[ip.String()] {
+		if now.Sub(upfNodeAddrs[node].seen) <= upfAddrLifetime {
+			return true
+		}
+	}
+
+	return false
 }
 
 // RelayReportSequence allocates the sequence number the adapter uses toward the SMF for a
@@ -458,23 +471,44 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (re
 	// until the counter comes round: an entry still outstanding would then be replaced, and the
 	// SMF's answer to the first report would be returned to the user plane that raised the
 	// second, while the first exchange was never answered at all.
-	for range relaySequenceCeil - relaySequenceFloor {
-		if reportRelaySeq < relaySequenceFloor || reportRelaySeq >= relaySequenceCeil {
-			reportRelaySeq = relaySequenceFloor
-		} else {
-			reportRelaySeq++
-		}
-
-		if _, taken := reportRelays[reportRelaySeq]; taken {
-			continue
-		}
-
-		reportRelays[reportRelaySeq] = reportRelay{upfAddr: upfAddr, upfSeq: upfSeq, recorded: now}
-
-		return reportRelaySeq, true, nil
+	candidate, free := nextFreeRelaySequence(reportRelays, reportRelaySeq, relaySequenceFloor, relaySequenceCeil)
+	if !free {
+		return 0, false, ErrRelaySequenceExhausted
 	}
 
-	return 0, false, ErrRelaySequenceExhausted
+	reportRelaySeq = candidate
+	reportRelays[candidate] = reportRelay{upfAddr: upfAddr, upfSeq: upfSeq, recorded: now}
+
+	return candidate, true, nil
+}
+
+// nextFreeRelaySequence returns the first number in [floor, ceil] that nothing is waiting on,
+// searching from the one after `from` and wrapping. It reports false when every number in the
+// range is outstanding.
+//
+// The trip count is one per assignable number, and the range is inclusive at both ends: the
+// counter resets only once it is past the ceiling, so the ceiling itself is handed out. One fewer
+// trip skips exactly one number -- the one the search started from, which the wrap reaches last --
+// and that is the number still free when every other is taken.
+//
+// It is a function of its arguments so the arithmetic can be tested over a range small enough to
+// fill; the live range holds 8 388 608 numbers.
+func nextFreeRelaySequence(outstanding map[uint32]reportRelay, from, floor, ceil uint32) (uint32, bool) {
+	candidate := from
+
+	for range ceil - floor + 1 {
+		if candidate < floor || candidate >= ceil {
+			candidate = floor
+		} else {
+			candidate++
+		}
+
+		if _, taken := outstanding[candidate]; !taken {
+			return candidate, true
+		}
+	}
+
+	return 0, false
 }
 
 // TakeReportRelay claims a relayed report for answering and returns where it came from,

@@ -651,3 +651,75 @@ func TestRelayReportSequenceSkipsANumberStillOutstanding(t *testing.T) {
 		t.Errorf("the outstanding entry under seq[%d] = %v, want the user plane that is waiting on it", held, addr)
 	}
 }
+
+// The lifetime has to hold when reports are the only traffic. The sweep runs on SMF messages, so
+// an SMF that has gone quiet is both the case the lifetime exists for and the case in which
+// nothing would ever sweep -- and the gate is asked on user-plane traffic, which keeps arriving.
+func TestAStaleAddressIsRefusedEvenWithNoSmfTrafficToSweepIt(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	RecordUpfAddr(types.NewNodeID("10.42.0.26"))
+
+	upfAddrMutex.Lock()
+	for node, record := range upfNodeAddrs {
+		record.seen = record.seen.Add(-upfAddrLifetime - time.Minute)
+		upfNodeAddrs[node] = record
+	}
+	upfAddrMutex.Unlock()
+
+	// No RecordUpfAddr in between: nothing has swept, and nothing will until the SMF speaks.
+	if IsKnownUpfAddr(net.ParseIP("10.42.0.26")) {
+		t.Error("a report was accepted for an address the SMF has not named for longer than its lifetime")
+	}
+}
+
+// The assignable range includes its ceiling: the counter resets only once it is past it. That is
+// what makes the allocator's candidate count one more than the difference -- trying one fewer
+// would report the range exhausted while the number the counter sits on is free.
+func TestTheRelaySequenceRangeIncludesItsCeiling(t *testing.T) {
+	withReportRelays(t)
+
+	upfAddr := &net.UDPAddr{IP: net.ParseIP("10.42.0.27"), Port: PfcpPort}
+
+	reportRelayMutex.Lock()
+	reportRelaySeq = relaySequenceCeil - 1
+	reportRelayMutex.Unlock()
+
+	if got, _ := relaySequence(t, upfAddr, 1, time.Now()); got != relaySequenceCeil {
+		t.Errorf("the number after the last but one = %d, want the ceiling %d", got, relaySequenceCeil)
+	}
+
+	if got, _ := relaySequence(t, upfAddr, 2, time.Now()); got != relaySequenceFloor {
+		t.Errorf("the number after the ceiling = %d, want the floor %d", got, relaySequenceFloor)
+	}
+}
+
+// The number the search starts from is the one the wrap reaches last, so a trip count one short
+// of the range skips exactly it -- and that is the number still free when every other is taken.
+// Tested over a range small enough to fill; the live one holds 8 388 608 numbers.
+func TestNextFreeRelaySequenceFindsTheOneTheWrapReachesLast(t *testing.T) {
+	const floor, ceil uint32 = 10, 13
+
+	outstanding := map[uint32]reportRelay{10: {}, 11: {}, 13: {}}
+
+	got, free := nextFreeRelaySequence(outstanding, 12, floor, ceil)
+	if !free {
+		t.Fatal("the range was reported exhausted while 12 was free")
+	}
+
+	if got != 12 {
+		t.Errorf("free number = %d, want 12", got)
+	}
+}
+
+// And it does report exhaustion when the range really is full, rather than handing out a number
+// an exchange is waiting on.
+func TestNextFreeRelaySequenceReportsAFullRange(t *testing.T) {
+	const floor, ceil uint32 = 10, 13
+
+	outstanding := map[uint32]reportRelay{10: {}, 11: {}, 12: {}, 13: {}}
+
+	if got, free := nextFreeRelaySequence(outstanding, 12, floor, ceil); free {
+		t.Errorf("free number = %d, want none: every number in the range is outstanding", got)
+	}
+}
