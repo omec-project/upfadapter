@@ -54,7 +54,11 @@ func TestASessionReportIsRelayedUnderTheNextNumberWhenOneIsInFlight(t *testing.T
 
 	// Learn where the allocator has got to, so the test does not depend on being the first
 	// to relay anything in this process.
-	probe, _ := config.RelayReportSequence(upfAddr, 0xFFFF, time.Now())
+	probe, _, err := config.RelayReportSequence(upfAddr, 0xFFFF, time.Now())
+	if err != nil {
+		t.Fatalf("probing the allocator: %v", err)
+	}
+
 	config.ForgetReportRelay(probe)
 
 	taken, free := probe+1, probe+2

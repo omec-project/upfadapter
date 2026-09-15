@@ -21,8 +21,14 @@ type TxTable struct {
 	m sync.Map // map[uint32]*Transaction
 }
 
-func (t *TxTable) Store(sequenceNumber uint32, tx *Transaction) {
-	t.m.Store(sequenceNumber, tx)
+// LoadOrStore inserts tx for sequenceNumber unless one is already there, and reports which
+// happened. Load-then-Store is not the same thing: two goroutines numbering requests at once can
+// both find a sequence free and both store, and the second silently replaces a transaction whose
+// response is still to come.
+func (t *TxTable) LoadOrStore(sequenceNumber uint32, tx *Transaction) (*Transaction, bool) {
+	existing, loaded := t.m.LoadOrStore(sequenceNumber, tx)
+
+	return existing.(*Transaction), loaded
 }
 
 func (t *TxTable) Load(sequenceNumber uint32) (*Transaction, bool) {

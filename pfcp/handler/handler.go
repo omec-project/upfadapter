@@ -249,7 +249,17 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 	// Renumber into the adapter's own sequence space before relaying; the UPF's number
 	// goes back on the response. See config.RelayReportSequence.
 	for attempt := 1; attempt <= relaySendAttempts; attempt++ {
-		relaySeq, fresh := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+		relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+		if errors.Is(err, config.ErrRelaySequenceExhausted) {
+			// Nothing to relay under. Answering is still better than silence: the user plane
+			// stops waiting and learns the traffic will not be delivered.
+			logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] cannot be relayed: %v",
+				upfSeq, upfAddr, err)
+			rejectSessionReport(seid, upfSeq, upfAddr)
+
+			return
+		}
+
 		if !fresh {
 			// A retransmission of a report still being relayed. Relaying it again would raise a
 			// second downlink data notification for traffic the SMF is already being told about;
@@ -263,7 +273,7 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 
 		report.SetSequenceNumber(relaySeq)
 
-		err := udp.SendPfcp(report, smfAddr, eventData)
+		err = udp.SendPfcp(report, smfAddr, eventData)
 		if err == nil {
 			logger.PfcpLog.Infof("relayed session report seq[%d] from UPF [%v] to SMF [%v] as seq[%d]",
 				upfSeq, upfAddr, smfAddr, relaySeq)

@@ -5,6 +5,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -171,11 +172,12 @@ var (
 
 	upfAddrMutex sync.RWMutex
 	// upfAddrs maps a user plane's address to the node identities currently reachable at
-	// it, and upfNodeAddrs is the reverse. Two identities can share one address -- the SMF
-	// may name the same user plane by FQDN in one message and by IP in another -- so an
-	// address stops being authorised only once no identity is left at it.
+	// it, and upfNodeAddrs is the reverse, with the time the SMF last named each identity.
+	// Two identities can share one address -- the SMF may name the same user plane by FQDN
+	// in one message and by IP in another -- so an address stops being authorised only once
+	// no identity is left at it.
 	upfAddrs     = make(map[string]map[string]struct{})
-	upfNodeAddrs = make(map[string]string)
+	upfNodeAddrs = make(map[string]upfNodeRecord)
 
 	reportRelayMutex sync.Mutex
 	reportRelays     = make(map[uint32]reportRelay)
@@ -187,6 +189,14 @@ const (
 	// SMF that never answers must not cost an entry for the life of the process.
 	reportRelayLifetime = 30 * time.Second
 
+	// upfAddrLifetime bounds how long an address stays authorised after the SMF stops naming
+	// the user plane at it. Every PFCP message the SMF forwards through the adapter names its
+	// user plane, heartbeats included, so a live node is renamed constantly and this only ever
+	// reaches one that has gone quiet altogether. It is deliberately far longer than any
+	// heartbeat period: expiring a node the SMF is still talking to would drop the session
+	// reports this relay exists to carry.
+	upfAddrLifetime = 30 * time.Minute
+
 	// relaySequenceFloor is where the adapter's own sequence numbers start. Sequence
 	// numbers are three octets and the SMF counts up from zero, so starting at the halfway
 	// point keeps the two apart in an ordinary deployment -- but only that. The SMF's
@@ -197,6 +207,19 @@ const (
 	relaySequenceFloor = 0x800000
 	relaySequenceCeil  = 0xFFFFFF
 )
+
+// upfNodeRecord is where one user plane was last reached and when the SMF last named it. The
+// address is empty for an identity whose name does not currently resolve: the SMF is still
+// addressing it, so it has not gone away, but there is no address to authorise for it.
+type upfNodeRecord struct {
+	seen time.Time
+	addr string
+}
+
+// ErrRelaySequenceExhausted reports that every sequence number the adapter allocates from is
+// outstanding. It is separate from a retransmission because the answer is different: the report
+// cannot be relayed at all, and the user plane has to be told so rather than left waiting.
+var ErrRelaySequenceExhausted = errors.New("no free relay sequence number")
 
 type reportRelay struct {
 	// Ordered so the fields carrying pointers lead: govet's fieldalignment counts the leading
@@ -275,24 +298,38 @@ func SmfAddr() *net.UDPAddr {
 // heartbeat instead -- the same way the SMF's own address does.
 func RecordUpfAddr(nodeId *types.NodeID) {
 	ip := nodeId.ResolveNodeIdToIp()
+	node := nodeKey(nodeId)
+	now := time.Now()
+
+	upfAddrMutex.Lock()
+	defer upfAddrMutex.Unlock()
+
+	// This message is the SMF naming the node, so record that before the sweep rather than
+	// after it. The other order expires a node whose name has not resolved for longer than the
+	// lifetime on the very message that shows it is still in use.
+	record := upfNodeAddrs[node]
+	record.seen = now
+	upfNodeAddrs[node] = record
+
+	expireUpfAddrsLocked(now)
+
 	if ip == nil || ip.IsUnspecified() {
-		// An FQDN that does not resolve yields IPv4zero. Recording that would admit
-		// nothing useful and match no peer.
+		// An FQDN that does not resolve yields IPv4zero, and there is no address to
+		// authorise. The identity stays named, because a name that fails to resolve for a
+		// moment is not a user plane that has gone: revoking here would stop relaying for a
+		// node that is merely waiting on DNS. What the record buys is the other case -- a
+		// node the SMF stops naming altogether ages out, and its address with it.
 		return
 	}
 
 	key := ip.String()
-	node := nodeKey(nodeId)
-
-	upfAddrMutex.Lock()
-	defer upfAddrMutex.Unlock()
 
 	// A node that moved stops authorising the address it left. Without this the set only
 	// ever grows: a user plane reached through a name, or one that came back on a new
 	// address, leaves its old address authorised for the life of the process, and reports
 	// from whatever occupies that address next are relayed as if the SMF had named it.
-	if previous, moved := upfNodeAddrs[node]; moved && previous != key {
-		forgetUpfAddrLocked(node, previous)
+	if record.addr != "" && record.addr != key {
+		forgetUpfAddrLocked(node, record.addr)
 	}
 
 	if _, known := upfAddrs[key]; !known {
@@ -303,7 +340,28 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 	}
 
 	upfAddrs[key][node] = struct{}{}
-	upfNodeAddrs[node] = key
+	upfNodeAddrs[node] = upfNodeRecord{addr: key, seen: now}
+}
+
+// expireUpfAddrsLocked drops the user planes the SMF has stopped naming, and the addresses left
+// with nothing at them. Callers hold upfAddrMutex.
+//
+// It runs from RecordUpfAddr rather than on a timer because every message the SMF forwards passes
+// through there, so the sweep happens exactly as often as there is anything to sweep.
+func expireUpfAddrsLocked(now time.Time) {
+	for node, record := range upfNodeAddrs {
+		if now.Sub(record.seen) <= upfAddrLifetime {
+			continue
+		}
+
+		delete(upfNodeAddrs, node)
+
+		if record.addr != "" {
+			logger.CfgLog.Infof("the SMF has not named the user plane at [%s] for %s; it is no longer relayed for",
+				record.addr, upfAddrLifetime)
+			forgetUpfAddrLocked(node, record.addr)
+		}
+	}
 }
 
 // nodeKey identifies one user plane across address changes. The type is part of it because
@@ -364,7 +422,7 @@ func IsKnownUpfAddr(ip net.IP) bool {
 // with the answer again -- but until then the report has no transaction here at all, and
 // every copy would be renumbered and forwarded separately, raising a downlink data
 // notification each time for traffic the SMF is already being told about.
-func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (relaySeq uint32, fresh bool) {
+func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (relaySeq uint32, fresh bool, err error) {
 	reportRelayMutex.Lock()
 	defer reportRelayMutex.Unlock()
 
@@ -393,18 +451,30 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (re
 	}
 
 	if relaying {
-		return outstanding, false
+		return outstanding, false, nil
 	}
 
-	if reportRelaySeq < relaySequenceFloor || reportRelaySeq >= relaySequenceCeil {
-		reportRelaySeq = relaySequenceFloor
-	} else {
-		reportRelaySeq++
+	// Advance to a number nothing is waiting on. Assigning the next one unconditionally is fine
+	// until the counter comes round: an entry still outstanding would then be replaced, and the
+	// SMF's answer to the first report would be returned to the user plane that raised the
+	// second, while the first exchange was never answered at all.
+	for range relaySequenceCeil - relaySequenceFloor {
+		if reportRelaySeq < relaySequenceFloor || reportRelaySeq >= relaySequenceCeil {
+			reportRelaySeq = relaySequenceFloor
+		} else {
+			reportRelaySeq++
+		}
+
+		if _, taken := reportRelays[reportRelaySeq]; taken {
+			continue
+		}
+
+		reportRelays[reportRelaySeq] = reportRelay{upfAddr: upfAddr, upfSeq: upfSeq, recorded: now}
+
+		return reportRelaySeq, true, nil
 	}
 
-	reportRelays[reportRelaySeq] = reportRelay{upfAddr: upfAddr, upfSeq: upfSeq, recorded: now}
-
-	return reportRelaySeq, true
+	return 0, false, ErrRelaySequenceExhausted
 }
 
 // TakeReportRelay claims a relayed report for answering and returns where it came from,

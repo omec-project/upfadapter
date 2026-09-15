@@ -71,8 +71,13 @@ func (t *ConsumerTable) Load(consumerAddr string) (*TxTable, bool) {
 	return nil, false
 }
 
-func (t *ConsumerTable) Store(consumerAddr string, txTable *TxTable) {
-	t.m.Store(consumerAddr, txTable)
+// LoadOrStore returns the table for consumerAddr, creating it only if there is none. Checking
+// first and storing afterwards lets two goroutines create a table for the same consumer at once,
+// and the transactions inserted into the loser are lost along with it.
+func (t *ConsumerTable) LoadOrStore(consumerAddr string, txTable *TxTable) *TxTable {
+	actual, _ := t.m.LoadOrStore(consumerAddr, txTable)
+
+	return actual.(*TxTable)
 }
 
 func init() {
@@ -80,16 +85,16 @@ func init() {
 }
 
 func PutTransaction(tx *Transaction) error {
-	consumerAddr := tx.ConsumerAddr
-	if _, exist := Server.ConsumerTable.Load(consumerAddr); !exist {
-		Server.ConsumerTable.Store(consumerAddr, &TxTable{})
-	}
-	txTable, _ := Server.ConsumerTable.Load(consumerAddr)
-	if _, exist := txTable.Load(tx.SequenceNumber); !exist {
-		txTable.Store(tx.SequenceNumber, tx)
-	} else {
+	// Both steps insert-if-absent in one operation. Reading first and writing afterwards leaves a
+	// window between the two: two goroutines sending at once could each find the consumer table
+	// missing and create one, or each find a sequence free and store under it, and in both cases
+	// one transaction is dropped while its caller is told the message went out.
+	txTable := Server.ConsumerTable.LoadOrStore(tx.ConsumerAddr, &TxTable{})
+
+	if _, loaded := txTable.LoadOrStore(tx.SequenceNumber, tx); loaded {
 		return fmt.Errorf("insert tx error: %w %d", ErrDuplicateSequence, tx.SequenceNumber)
 	}
+
 	return nil
 }
 
