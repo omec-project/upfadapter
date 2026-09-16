@@ -44,8 +44,19 @@ func (t *TxTable) Load(sequenceNumber uint32) (*Transaction, bool) {
 	return nil, false
 }
 
-func (t *TxTable) Delete(sequenceNumber uint32) {
-	t.m.Delete(sequenceNumber)
+// DeleteIf removes the transaction under sequenceNumber only while it is still this one.
+//
+// A transaction is removed by the goroutine that ran it, which loads the table by the peer's
+// address. That address can belong to a different table by then: releasing a peer drops its
+// table, and a peer named again gets a new one. Deleting by sequence number alone would then
+// remove a live successor's transaction -- and a response's job is to stay until its resend
+// window ends, so removing it early lets the next retransmission through as a new report.
+func (t *TxTable) DeleteIf(sequenceNumber uint32, tx *Transaction) bool {
+	if t == nil {
+		return false
+	}
+
+	return t.m.CompareAndDelete(sequenceNumber, tx)
 }
 
 const (

@@ -303,18 +303,19 @@ func removeTransaction(tx *Transaction) error {
 	consumerAddr := tx.ConsumerAddr
 	txTable, _ := Server.ConsumerTable.Load(consumerAddr)
 
-	if txTmp, exist := txTable.Load(tx.SequenceNumber); exist {
-		tx = txTmp
-		switch tx.TxType {
-		case SendingRequest:
-			logger.PfcpLog.Debugf("remove request transaction [%d]", tx.SequenceNumber)
-		case SendingResponse:
-			logger.PfcpLog.Debugf("remove response transaction [%d]", tx.SequenceNumber)
-		}
-
-		txTable.Delete(tx.SequenceNumber)
-	} else {
-		return fmt.Errorf("remove tx error: transaction [%d] doesn't exist", tx.SequenceNumber)
+	if !txTable.DeleteIf(tx.SequenceNumber, tx) {
+		// Either it is already gone, or what is under that number now belongs to someone else:
+		// the peer was released and named again, and this table is the successor's.
+		return fmt.Errorf("remove tx error: transaction [%d] is no longer the one held for %s",
+			tx.SequenceNumber, consumerAddr)
 	}
+
+	switch tx.TxType {
+	case SendingRequest:
+		logger.PfcpLog.Debugf("remove request transaction [%d]", tx.SequenceNumber)
+	case SendingResponse:
+		logger.PfcpLog.Debugf("remove response transaction [%d]", tx.SequenceNumber)
+	}
+
 	return nil
 }

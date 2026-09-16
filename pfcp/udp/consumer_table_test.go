@@ -4,7 +4,14 @@
 
 package udp
 
-import "testing"
+import (
+	"context"
+	"net"
+	"testing"
+
+	"github.com/wmnsk/go-pfcp/ie"
+	"github.com/wmnsk/go-pfcp/message"
+)
 
 // Answering a user plane leaves a transaction table keyed by its own address, and nothing in the
 // transaction machinery removes an empty one -- so without this, every peer ever answered costs an
@@ -27,5 +34,65 @@ func TestDeleteByHostReleasesEveryPortSeenForOnePeer(t *testing.T) {
 
 	if _, found := table.Load("10.0.0.2:8805"); !found {
 		t.Error("another user plane's table was released with it")
+	}
+}
+
+// A transaction is removed by the goroutine that ran it, which finds its table by the peer's
+// address — and that address can belong to a different table by then, since releasing a peer drops
+// its table and a peer named again gets a new one. Removing by sequence number alone would take a
+// live successor's response out of its resend window, and the next retransmission would be relayed
+// to the SMF as a new report.
+func TestRemovingATransactionLeavesItsSuccessorAlone(t *testing.T) {
+	packet, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	defer packet.Close()
+
+	conn, ok := packet.(*net.UDPConn)
+	if !ok {
+		t.Fatalf("listener is %T, want *net.UDPConn", packet)
+	}
+
+	previous := Server
+	Server = &PfcpServer{Addr: conn.LocalAddr().(*net.UDPAddr), Conn: conn}
+
+	t.Cleanup(func() { Server = previous })
+
+	peer := &net.UDPAddr{IP: net.ParseIP("127.0.0.3"), Port: PFCP_PORT}
+
+	response := func() *Transaction {
+		msg := message.NewSessionReportResponse(0, 0, 0x1, 7, 0, ie.NewCause(ie.CauseRequestAccepted))
+		buf := make([]byte, msg.MarshalLen())
+
+		if err := msg.MarshalTo(buf); err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+
+		return NewTransaction(msg, buf, conn, peer, nil)
+	}
+
+	stale := response()
+	if err := PutTransaction(stale); err != nil {
+		t.Fatalf("holding the first response: %v", err)
+	}
+
+	// The peer stops being one, and is then named again: a new table, a new response, the same
+	// address and the same sequence number.
+	ForgetConsumer("127.0.0.3")
+
+	successor := response()
+	if err := PutTransaction(successor); err != nil {
+		t.Fatalf("holding the successor's response: %v", err)
+	}
+
+	if err := removeTransaction(stale); err == nil {
+		t.Error("removing the released peer's transaction reported success against a table it no longer belongs to")
+	}
+
+	held, found := Server.ConsumerTable.LoadOrStore(peer.String(), &TxTable{}).Load(7)
+	if !found || held != successor {
+		t.Error("the successor's response was removed by the goroutine of the transaction that preceded it")
 	}
 }
