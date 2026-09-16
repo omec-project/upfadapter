@@ -296,7 +296,10 @@ func SmfAddr() *net.UDPAddr {
 // associate again and the table would stay empty for the life of the association. Every
 // message the SMF forwards names its user plane, so this set comes back within one
 // heartbeat instead -- the same way the SMF's own address does.
-func RecordUpfAddr(nodeId *types.NodeID) {
+// It returns the addresses it stopped authorising, so the caller can release the per-peer state
+// they were holding. Nothing will be relayed or answered for them again without the SMF naming
+// them afresh, which records them here first.
+func RecordUpfAddr(nodeId *types.NodeID) []string {
 	ip := nodeId.ResolveNodeIdToIp()
 	node := nodeKey(nodeId)
 	now := time.Now()
@@ -311,7 +314,7 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 	record.seen = now
 	upfNodeAddrs[node] = record
 
-	expireUpfAddrsLocked(now)
+	expired := expireUpfAddrsLocked(now)
 
 	if ip == nil || ip.IsUnspecified() {
 		// An FQDN that does not resolve yields IPv4zero, and there is no address to
@@ -319,7 +322,7 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 		// moment is not a user plane that has gone: revoking here would stop relaying for a
 		// node that is merely waiting on DNS. What the record buys is the other case -- a
 		// node the SMF stops naming altogether ages out, and its address with it.
-		return
+		return expired
 	}
 
 	key := ip.String()
@@ -328,8 +331,12 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 	// ever grows: a user plane reached through a name, or one that came back on a new
 	// address, leaves its old address authorised for the life of the process, and reports
 	// from whatever occupies that address next are relayed as if the SMF had named it.
+	released := expired
+
 	if record.addr != "" && record.addr != key {
-		forgetUpfAddrLocked(node, record.addr)
+		if gone := forgetUpfAddrLocked(node, record.addr); gone {
+			released = append(released, record.addr)
+		}
 	}
 
 	if _, known := upfAddrs[key]; !known {
@@ -341,6 +348,8 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 
 	upfAddrs[key][node] = struct{}{}
 	upfNodeAddrs[node] = upfNodeRecord{addr: key, seen: now}
+
+	return released
 }
 
 // expireUpfAddrsLocked drops the user planes the SMF has stopped naming, and the addresses left
@@ -348,7 +357,9 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 //
 // It runs from RecordUpfAddr rather than on a timer because every message the SMF forwards passes
 // through there, so the sweep happens exactly as often as there is anything to sweep.
-func expireUpfAddrsLocked(now time.Time) {
+func expireUpfAddrsLocked(now time.Time) []string {
+	var released []string
+
 	for node, record := range upfNodeAddrs {
 		if now.Sub(record.seen) <= upfAddrLifetime {
 			continue
@@ -359,9 +370,14 @@ func expireUpfAddrsLocked(now time.Time) {
 		if record.addr != "" {
 			logger.CfgLog.Infof("the SMF has not named the user plane at [%s] for %s; it is no longer relayed for",
 				record.addr, upfAddrLifetime)
-			forgetUpfAddrLocked(node, record.addr)
+
+			if gone := forgetUpfAddrLocked(node, record.addr); gone {
+				released = append(released, record.addr)
+			}
 		}
 	}
+
+	return released
 }
 
 // nodeKey identifies one user plane across address changes. The type is part of it because
@@ -370,20 +386,25 @@ func nodeKey(nodeId *types.NodeID) string {
 	return fmt.Sprintf("%d/%s", nodeId.NodeIdType, nodeId.NodeIdValue)
 }
 
-// forgetUpfAddrLocked drops one identity from an address and the address with it once no
-// identity is left there. Callers hold upfAddrMutex.
-func forgetUpfAddrLocked(node, addr string) {
+// forgetUpfAddrLocked drops one identity from an address, and the address with it once no
+// identity is left there. It reports whether the address itself went away, so a caller can
+// release what it was holding for that peer. Callers hold upfAddrMutex.
+func forgetUpfAddrLocked(node, addr string) bool {
 	nodes, known := upfAddrs[addr]
 	if !known {
-		return
+		return false
 	}
 
 	delete(nodes, node)
 
-	if len(nodes) == 0 {
-		delete(upfAddrs, addr)
-		logger.CfgLog.Infof("no user plane the SMF has named is at [%s] any more; reports from it will not be relayed", addr)
+	if len(nodes) > 0 {
+		return false
 	}
+
+	delete(upfAddrs, addr)
+	logger.CfgLog.Infof("no user plane the SMF has named is at [%s] any more; reports from it will not be relayed", addr)
+
+	return true
 }
 
 // IsKnownUpfAddr reports whether a peer is one of the user-plane functions the SMF has

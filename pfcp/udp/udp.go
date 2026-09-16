@@ -71,6 +71,24 @@ func (t *ConsumerTable) Load(consumerAddr string) (*TxTable, bool) {
 	return nil, false
 }
 
+// DeleteByHost drops the tables of every consumer at one address, whatever port each was seen
+// on. A response is keyed by the peer's own source address, and the port that arrives on is the
+// peer's to choose, so releasing one guessed port would leave the entry that exists.
+func (t *ConsumerTable) DeleteByHost(ip string) {
+	t.m.Range(func(key, _ any) bool {
+		consumerAddr, ok := key.(string)
+		if !ok {
+			return true
+		}
+
+		if host, _, err := net.SplitHostPort(consumerAddr); err == nil && host == ip {
+			t.m.Delete(consumerAddr)
+		}
+
+		return true
+	})
+}
+
 // LoadOrStore returns the table for consumerAddr, creating it only if there is none. Checking
 // first and storing afterwards lets two goroutines create a table for the same consumer at once,
 // and the transactions inserted into the loser are lost along with it.
@@ -82,6 +100,23 @@ func (t *ConsumerTable) LoadOrStore(consumerAddr string, txTable *TxTable) *TxTa
 
 func init() {
 	CPNodeID = &types.NodeID{NodeIdType: uint8(0), NodeIdValue: []byte(config.UpfAdapterIp)}
+}
+
+// ForgetConsumer drops the transaction table held for a peer.
+//
+// Responses are held per peer -- ConsumerAddr is the destination for a response, unlike a request,
+// which is keyed by this socket -- so answering user planes leaves one table each, and nothing in
+// the transaction machinery ever removes an empty one. Reclaiming them by emptiness would race the
+// next insertion for the same peer, and losing that race means a retransmission is relayed a second
+// time, which is the defect this relay exists to remove. Reclaiming them when the peer stops being
+// authorised does not: the source gate refuses its reports from that moment, so there is nothing
+// left to absorb.
+func ForgetConsumer(ip string) {
+	if Server == nil {
+		return
+	}
+
+	Server.ConsumerTable.DeleteByHost(ip)
 }
 
 func PutTransaction(tx *Transaction) error {

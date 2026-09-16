@@ -723,3 +723,42 @@ func TestNextFreeRelaySequenceReportsAFullRange(t *testing.T) {
 		t.Errorf("free number = %d, want none: every number in the range is outstanding", got)
 	}
 }
+
+// The caller needs to know which addresses stopped being authorised, because the per-peer state it
+// holds for them — a transaction table each, keyed by the peer's own address — is released with
+// them. Nothing else would ever remove it.
+func TestRecordUpfAddrReportsTheAddressesItReleased(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	types.InsertDnsHostIp("leaving.5gc.svc", net.ParseIP("10.42.0.28"))
+
+	if released := RecordUpfAddr(types.NewNodeID("leaving.5gc.svc")); len(released) != 0 {
+		t.Fatalf("recording a new user plane released %v, want nothing", released)
+	}
+
+	types.InsertDnsHostIp("leaving.5gc.svc", net.ParseIP("10.42.0.29"))
+
+	released := RecordUpfAddr(types.NewNodeID("leaving.5gc.svc"))
+	if len(released) != 1 || released[0] != "10.42.0.28" {
+		t.Errorf("the move released %v, want the address it left", released)
+	}
+}
+
+// The same for an address that ages out rather than being left: the state goes with it.
+func TestTheSweepReportsTheAddressesItReleased(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	RecordUpfAddr(types.NewNodeID("10.42.0.30"))
+
+	upfAddrMutex.Lock()
+	for node, record := range upfNodeAddrs {
+		record.seen = record.seen.Add(-upfAddrLifetime - time.Minute)
+		upfNodeAddrs[node] = record
+	}
+	upfAddrMutex.Unlock()
+
+	released := RecordUpfAddr(types.NewNodeID("10.42.0.31"))
+	if len(released) != 1 || released[0] != "10.42.0.30" {
+		t.Errorf("the sweep released %v, want the address it aged out", released)
+	}
+}
