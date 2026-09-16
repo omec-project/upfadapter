@@ -6,6 +6,9 @@ package config
 
 import (
 	"net"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,13 +108,16 @@ func withReportRelays(t *testing.T) {
 	t.Helper()
 
 	reportRelayMutex.Lock()
-	relays, seq := reportRelays, reportRelaySeq
-	reportRelays, reportRelaySeq = make(map[uint32]reportRelay), 0
+	relays, byHost, seq, swept := reportRelays, relaysByHost, reportRelaySeq, lastRelaySweep
+	reportRelays, relaysByHost, reportRelaySeq = make(map[uint32]reportRelay), make(map[string]map[uint32]struct{}), 0
+	// The sweep clock too: left at another test's wall-clock reading, a case that records its
+	// entries in the past would find the throttle closed and never sweep at all.
+	lastRelaySweep = time.Time{}
 	reportRelayMutex.Unlock()
 
 	t.Cleanup(func() {
 		reportRelayMutex.Lock()
-		reportRelays, reportRelaySeq = relays, seq
+		reportRelays, relaysByHost, reportRelaySeq, lastRelaySweep = relays, byHost, seq, swept
 		reportRelayMutex.Unlock()
 	})
 }
@@ -781,5 +787,209 @@ func TestAnAddressThatAgesOutIsReleased(t *testing.T) {
 
 	if len(released) != 1 || released[0] != "10.42.0.30" {
 		t.Errorf("released %v, want the address that aged out", released)
+	}
+}
+
+// A relay sequence number the SMF is already using is refused, and the report has to go out under
+// another one. The claim on the report must survive that: it is what a retransmission arriving
+// meanwhile is recognised by, and dropping it to allocate again left the report unclaimed in
+// between -- so that copy was relayed on its own account, and one report from one user plane
+// became two downlink data notifications.
+func TestRenumberingAReportKeepsItClaimed(t *testing.T) {
+	withReportRelays(t)
+
+	upf := &net.UDPAddr{IP: net.ParseIP("10.42.0.190"), Port: PfcpPort}
+	now := time.Now()
+
+	first, fresh := relaySequence(t, upf, 9, now)
+	if !fresh {
+		t.Fatal("the first report was not treated as fresh")
+	}
+
+	second, err := RenumberReportRelay(first)
+	if err != nil {
+		t.Fatalf("renumbering the relay: %v", err)
+	}
+
+	if second == first {
+		t.Errorf("RenumberReportRelay(%d) = %d, want a different number", first, second)
+	}
+
+	// The retransmission the renumber has to survive.
+	held, stillFresh := relaySequence(t, upf, 9, now)
+	if stillFresh {
+		t.Error("a retransmission arriving during the renumber was taken for a fresh report; the SMF gets a second notification for one report")
+	}
+
+	if held != second {
+		t.Errorf("the retransmission is held as %d, want the renumbered %d", held, second)
+	}
+
+	if addr, upfSeq := TakeReportRelay(first); addr != nil {
+		t.Errorf("TakeReportRelay(%d) = %v/%d, want nil: nothing is outstanding under the number that was refused", first, addr, upfSeq)
+	}
+
+	if addr, _ := TakeReportRelay(second); addr == nil {
+		t.Errorf("TakeReportRelay(%d) = nil, want the peer the report came from", second)
+	}
+}
+
+// An address stops being a user plane the SMF names, and its outstanding relays go with it.
+//
+// Addresses are reused: a pod that leaves gives its address to the next one. The new occupant's
+// first report can carry a sequence number the previous occupant had outstanding, and with the
+// old origin still held it is matched as that report's retransmission -- so the new peer's report
+// is never relayed, and the answer to the old one is delivered to a user plane that never sent it.
+func TestARelayIsForgottenWithTheUserPlaneThatRaisedIt(t *testing.T) {
+	isolateUpfAddrs(t)
+	withReportRelays(t)
+
+	left := net.ParseIP("10.42.0.220")
+	upf := &net.UDPAddr{IP: left, Port: PfcpPort}
+
+	types.InsertDnsHostIp("leaving.5gc.svc", left)
+	RecordUpfAddr(types.NewNodeID("leaving.5gc.svc"))
+
+	outstanding, _ := relaySequence(t, upf, 4, time.Now())
+
+	// The node moves, which is what releases the address it was at.
+	types.InsertDnsHostIp("leaving.5gc.svc", net.ParseIP("10.42.0.221"))
+	RecordUpfAddr(types.NewNodeID("leaving.5gc.svc"))
+
+	if addr, _ := TakeReportRelay(outstanding); addr != nil {
+		t.Errorf("TakeReportRelay(%d) = %v, want nil: the user plane it belonged to is gone", outstanding, addr)
+	}
+
+	// The address's next occupant, numbering its reports from its own counter.
+	successor, fresh := relaySequence(t, upf, 4, time.Now())
+	if !fresh {
+		t.Error("a new user plane's report was taken for the previous occupant's retransmission, so it is never relayed")
+	}
+
+	if successor == outstanding {
+		t.Errorf("the successor was given the number the previous occupant held (%d)", successor)
+	}
+
+	reportRelayMutex.Lock()
+	defer reportRelayMutex.Unlock()
+
+	if _, held := relaysByHost[left.String()][outstanding]; held {
+		t.Error("the index still names the forgotten relay, so it outlives the entry it points at")
+	}
+}
+
+// The index and the table it indexes are written together, so nothing keyed by a peer outlives
+// the entries it names -- a leak here would be invisible until the map held every peer the
+// adapter had ever relayed for.
+func TestTheHostIndexDoesNotOutliveItsEntries(t *testing.T) {
+	withReportRelays(t)
+
+	upf := &net.UDPAddr{IP: net.ParseIP("10.42.0.230"), Port: PfcpPort}
+
+	relaySeq, _ := relaySequence(t, upf, 11, time.Now())
+	ForgetReportRelay(relaySeq)
+
+	reportRelayMutex.Lock()
+	defer reportRelayMutex.Unlock()
+
+	if held := len(relaysByHost); held != 0 {
+		t.Errorf("relaysByHost holds %d hosts after the only entry was forgotten, want none", held)
+	}
+}
+
+// The sweep is throttled so it does not run on every packet, but it still has to run: an SMF that
+// stops answering must not cost an entry per report for the life of the process.
+func TestTheSweepStillReclaimsWhatTheSmfNeverAnswered(t *testing.T) {
+	withReportRelays(t)
+
+	now := time.Now()
+
+	for i := range 4 {
+		relaySequence(t, &net.UDPAddr{IP: net.ParseIP("10.42.0.240"), Port: PfcpPort + i}, uint32(i), now.Add(-2*reportRelayLifetime))
+	}
+
+	// One later report, far enough on that the throttle is open.
+	relaySequence(t, &net.UDPAddr{IP: net.ParseIP("10.42.0.241"), Port: PfcpPort}, 99, now)
+
+	reportRelayMutex.Lock()
+	defer reportRelayMutex.Unlock()
+
+	if held := len(reportRelays); held != 1 {
+		t.Errorf("reportRelays holds %d entries, want only the one inside its lifetime", held)
+	}
+}
+
+// The window the renumber closes is a race, so this is what actually holds it shut: while a report
+// is being moved from one number to the next, a retransmission of it must never be seen as fresh.
+//
+// It was two operations before -- forget the entry, then claim a number again -- with the lock
+// released in between, and a copy of the report arriving in that gap found nothing claimed and was
+// relayed on its own account. Renumbering under one hold is what removes the gap; this fails if it
+// is ever reopened.
+func TestNoRetransmissionSlipsThroughARenumber(t *testing.T) {
+	withReportRelays(t)
+
+	if runtime.GOMAXPROCS(0) < 2 {
+		// One processor serialises the two goroutines and the window never opens, so the test
+		// would pass on a machine where the defect is still present.
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(2))
+	}
+
+	upf := &net.UDPAddr{IP: net.ParseIP("10.42.0.250"), Port: PfcpPort}
+
+	relaySeq, fresh := relaySequence(t, upf, 12, time.Now())
+	if !fresh {
+		t.Fatal("the report was not claimed to begin with")
+	}
+
+	var (
+		wg      sync.WaitGroup
+		slipped atomic.Bool
+	)
+
+	done := make(chan struct{})
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		defer close(done)
+
+		held := relaySeq
+
+		for range 2000 {
+			next, err := RenumberReportRelay(held)
+			if err != nil {
+				return
+			}
+
+			held = next
+		}
+	}()
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+
+			if _, fresh, err := RelayReportSequence(upf, 12, time.Now()); err == nil && fresh {
+				slipped.Store(true)
+
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	if slipped.Load() {
+		t.Error("a retransmission was taken for a fresh report while its relay was being renumbered; the SMF is told twice about one report, and pages twice")
 	}
 }

@@ -181,13 +181,28 @@ var (
 
 	reportRelayMutex sync.Mutex
 	reportRelays     = make(map[uint32]reportRelay)
-	reportRelaySeq   uint32
+	// relaysByHost indexes the same entries by the address that raised them, so recognising a
+	// retransmission costs the reports outstanding from one user plane rather than from all of
+	// them, and so a peer that stops being authorised can have its origins dropped without a
+	// walk. It holds keys into reportRelays and is maintained with it, never separately.
+	relaysByHost   = make(map[string]map[uint32]struct{})
+	reportRelaySeq uint32
+	lastRelaySweep time.Time
 )
 
 const (
 	// reportRelayLifetime bounds how long the origin of a relayed report is remembered. An
 	// SMF that never answers must not cost an entry for the life of the process.
 	reportRelayLifetime = 30 * time.Second
+
+	// relaySweepInterval bounds how often the expiry walk runs. Entries are dropped when their
+	// answer is sent, so the table holds the reports genuinely in flight and the walk is short --
+	// but an SMF that has stopped answering is exactly when it grows, and that is the worst moment
+	// to spend a whole-table walk, under the one lock every user plane shares, on every packet.
+	// Expiry is housekeeping and does not have to be prompt: what must not be stale is the
+	// retransmission match, which tests the age of the entry it matched instead of trusting the
+	// sweep to have removed it.
+	relaySweepInterval = time.Second
 
 	// upfAddrLifetime bounds how long an address stays authorised after the SMF stops naming
 	// the user plane at it. Every PFCP message the SMF forwards through the adapter names its
@@ -236,6 +251,10 @@ func OnUpfAddrReleased(hook func(addr string)) {
 // outstanding. It is separate from a retransmission because the answer is different: the report
 // cannot be relayed at all, and the user plane has to be told so rather than left waiting.
 var ErrRelaySequenceExhausted = errors.New("no free relay sequence number")
+
+// ErrRelayNotHeld reports that the relay a caller wants renumbered is no longer in the table --
+// it was answered, or given up on, while the send that failed was in flight.
+var ErrRelayNotHeld = errors.New("no such report relay")
 
 type reportRelay struct {
 	// Ordered so the fields carrying pointers lead: govet's fieldalignment counts the leading
@@ -406,6 +425,8 @@ func forgetUpfAddrLocked(node, addr string) {
 	delete(upfAddrs, addr)
 	logger.CfgLog.Infof("no user plane the SMF has named is at [%s] any more; reports from it will not be relayed", addr)
 
+	ForgetRelaysForHost(addr)
+
 	if upfAddrReleased != nil {
 		upfAddrReleased(addr)
 	}
@@ -464,31 +485,9 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (re
 	reportRelayMutex.Lock()
 	defer reportRelayMutex.Unlock()
 
-	var (
-		outstanding uint32
-		relaying    bool
-	)
+	sweepRelaysLocked(now)
 
-	// The sweep walks the whole map already, so recognising a retransmission rides along
-	// with it rather than costing an index of its own.
-	for held, relay := range reportRelays {
-		if now.Sub(relay.recorded) > reportRelayLifetime {
-			delete(reportRelays, held)
-			// Both numbers, and the peer: the map is keyed by the adapter's own sequence while the
-			// user plane is waiting on its own, and several user planes can be waiting on the same
-			// one. Reporting only the user plane's number names an entry that cannot be looked up.
-			logger.CfgLog.Warnf("no response was relayed for session report from %v: adapter seq[%d], user plane seq[%d]; forgetting it",
-				relay.upfAddr, held, relay.upfSeq)
-
-			continue
-		}
-
-		if relay.upfSeq == upfSeq && relay.upfAddr.IP.Equal(upfAddr.IP) && relay.upfAddr.Port == upfAddr.Port {
-			outstanding, relaying = held, true
-		}
-	}
-
-	if relaying {
+	if outstanding, relaying := relayFromLocked(upfAddr, upfSeq, now); relaying {
 		return outstanding, false, nil
 	}
 
@@ -502,9 +501,136 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (re
 	}
 
 	reportRelaySeq = candidate
-	reportRelays[candidate] = reportRelay{upfAddr: upfAddr, upfSeq: upfSeq, recorded: now}
+	recordRelayLocked(candidate, reportRelay{upfAddr: upfAddr, upfSeq: upfSeq, recorded: now})
 
 	return candidate, true, nil
+}
+
+// relayFromLocked reports the number a report from this peer is already being relayed under.
+//
+// The entry's age is tested here rather than left to the sweep: the sweep is throttled, so an
+// entry that has outlived the lifetime can still be in the table, and matching it would answer a
+// fresh report with a relay that is no longer waiting for anything.
+func relayFromLocked(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (uint32, bool) {
+	for held := range relaysByHost[upfAddr.IP.String()] {
+		relay := reportRelays[held]
+		if relay.upfSeq == upfSeq && relay.upfAddr.Port == upfAddr.Port &&
+			now.Sub(relay.recorded) <= reportRelayLifetime {
+			return held, true
+		}
+	}
+
+	return 0, false
+}
+
+// recordRelayLocked and dropRelayLocked are the only writers of the two tables, so the index
+// cannot drift from what it indexes.
+func recordRelayLocked(relaySeq uint32, relay reportRelay) {
+	reportRelays[relaySeq] = relay
+
+	host := relay.upfAddr.IP.String()
+	if relaysByHost[host] == nil {
+		relaysByHost[host] = make(map[uint32]struct{})
+	}
+
+	relaysByHost[host][relaySeq] = struct{}{}
+}
+
+func dropRelayLocked(relaySeq uint32) {
+	relay, held := reportRelays[relaySeq]
+	if !held {
+		return
+	}
+
+	delete(reportRelays, relaySeq)
+
+	host := relay.upfAddr.IP.String()
+	delete(relaysByHost[host], relaySeq)
+
+	if len(relaysByHost[host]) == 0 {
+		delete(relaysByHost, host)
+	}
+}
+
+// sweepRelaysLocked drops the entries the SMF never answered, at most once every
+// relaySweepInterval.
+func sweepRelaysLocked(now time.Time) {
+	if now.Sub(lastRelaySweep) < relaySweepInterval {
+		return
+	}
+
+	lastRelaySweep = now
+
+	for held, relay := range reportRelays {
+		if now.Sub(relay.recorded) <= reportRelayLifetime {
+			continue
+		}
+
+		// Both numbers, and the peer: the table is keyed by the adapter's own sequence while the
+		// user plane is waiting on its own, and several user planes can be waiting on the same
+		// one. Reporting only the user plane's number names an entry that cannot be looked up.
+		logger.CfgLog.Warnf("no response was relayed for session report from %v: adapter seq[%d], user plane seq[%d]; forgetting it",
+			relay.upfAddr, held, relay.upfSeq)
+
+		dropRelayLocked(held)
+	}
+}
+
+// RenumberReportRelay moves a relay that could not go out under its number to the next free one,
+// keeping the report's identity reserved throughout.
+//
+// The number is refused when an SMF-originated request is already in flight under it, and the
+// report has to be sent under another. Dropping the entry and allocating again left the report
+// unclaimed in between: a retransmission arriving in that gap matched nothing, was taken for a
+// fresh report, and was relayed on its own account -- so one report from one user plane became
+// two downlink data notifications, which is what the freshness check exists to prevent. Messages
+// are dispatched on their own goroutines, so the gap is reachable.
+func RenumberReportRelay(relaySeq uint32) (uint32, error) {
+	reportRelayMutex.Lock()
+	defer reportRelayMutex.Unlock()
+
+	relay, held := reportRelays[relaySeq]
+	if !held {
+		return 0, ErrRelayNotHeld
+	}
+
+	candidate, free := nextFreeRelaySequence(reportRelays, reportRelaySeq, relaySequenceFloor, relaySequenceCeil)
+	if !free {
+		dropRelayLocked(relaySeq)
+
+		return 0, ErrRelaySequenceExhausted
+	}
+
+	dropRelayLocked(relaySeq)
+
+	reportRelaySeq = candidate
+	recordRelayLocked(candidate, relay)
+
+	return candidate, nil
+}
+
+// ForgetRelaysForHost drops the reports being relayed for a peer that has stopped being one the
+// SMF names. Callers hold upfAddrMutex; this takes reportRelayMutex under it, which is the only
+// order the two are ever held in.
+//
+// Without it the origins outlived the authorisation by up to reportRelayLifetime. An address in a
+// cluster is reused, and the next occupant's first report can carry a sequence number the previous
+// occupant had outstanding: it would be matched as that one's retransmission, so the new peer's
+// report is never relayed and the answer to the old one is delivered to it instead.
+func ForgetRelaysForHost(addr string) {
+	reportRelayMutex.Lock()
+	defer reportRelayMutex.Unlock()
+
+	// Through dropRelayLocked, one entry at a time, rather than clearing the two tables here:
+	// deleting from a map while ranging over it is safe, and a second place that writes them
+	// would be a second place to remember when either grows a field. The bucket goes with its
+	// last entry.
+	for held := range relaysByHost[addr] {
+		logger.CfgLog.Infof("user plane at [%s] is no longer named by the SMF; forgetting its session report relay: adapter seq[%d], user plane seq[%d]",
+			addr, held, reportRelays[held].upfSeq)
+
+		dropRelayLocked(held)
+	}
 }
 
 // nextFreeRelaySequence returns the first number in [floor, ceil] that nothing is waiting on,
@@ -556,6 +682,14 @@ func TakeReportRelay(relaySeq uint32) (*net.UDPAddr, uint32) {
 		return nil, 0
 	}
 
+	// Age is tested here and not left to the sweep, which is throttled and may not have reached
+	// this entry yet. The lifetime is what the user plane was promised: past it, the adapter has
+	// given up on the report and the user plane has been told so, and answering it afterwards
+	// would answer a report nothing is waiting on.
+	if time.Since(relay.recorded) > reportRelayLifetime {
+		return nil, 0
+	}
+
 	relay.answered = true
 	reportRelays[relaySeq] = relay
 
@@ -568,7 +702,7 @@ func ForgetReportRelay(relaySeq uint32) {
 	reportRelayMutex.Lock()
 	defer reportRelayMutex.Unlock()
 
-	delete(reportRelays, relaySeq)
+	dropRelayLocked(relaySeq)
 }
 
 func InsertUpfPfcpTxn(seq uint32, pfcpTxnChan PfcpTxnChan) {
