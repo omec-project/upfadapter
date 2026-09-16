@@ -7,6 +7,9 @@ package handler
 import (
 	"context"
 	"net"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,5 +92,93 @@ func TestASessionReportIsRelayedUnderTheNextNumberWhenOneIsInFlight(t *testing.T
 
 	if !addr.IP.Equal(upfAddr.IP) || upfSeq != 11 {
 		t.Errorf("relay under seq[%d] came from %v seq[%d], want %v seq[11]", free, addr, upfSeq, upfAddr)
+	}
+}
+
+// absorbedByAnAnswer reports whether a retransmitted report would be met by the answer already
+// sent for it, which is what the receive path asks before a report ever reaches this handler.
+func absorbedByAnAnswer(upfAddr *net.UDPAddr, upfSeq uint32) bool {
+	txTable, held := udp.Server.ConsumerTable.Load(upfAddr.String())
+	if !held {
+		return false
+	}
+
+	_, answered := txTable.Load(upfSeq)
+
+	return answered
+}
+
+// A report is absorbed by its claim while it is being relayed, and by the answer once one has been
+// sent. Refusing it moves it from the first to the second, and the two must overlap: for an
+// instant where neither holds, a retransmission is neither recognised nor answered, and is relayed
+// on its own account -- the second downlink data notification, and the second page.
+//
+// The sampler asks the same two questions the receive path asks, in the same order, so a report it
+// would relay is a report production would relay.
+func TestARefusedReportIsNeverUnclaimedAndUnanswered(t *testing.T) {
+	listeningAdapter(t)
+
+	if runtime.GOMAXPROCS(0) < 2 {
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(2))
+	}
+
+	upfAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.9"), Port: config.PfcpPort}
+
+	const (
+		rounds = 200
+		seid   = uint64(0x9999)
+	)
+
+	var slipped atomic.Bool
+
+	for round := range rounds {
+		upfSeq := uint32(3000 + round)
+
+		relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+		if err != nil || !fresh {
+			t.Fatalf("claiming report %d: relay %d fresh %v err %v", upfSeq, relaySeq, fresh, err)
+		}
+
+		var wg sync.WaitGroup
+
+		done := make(chan struct{})
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+
+				if absorbedByAnAnswer(upfAddr, upfSeq) {
+					continue
+				}
+
+				probe, probeFresh, probeErr := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+				if probeErr != nil {
+					continue
+				}
+
+				if probeFresh {
+					slipped.Store(true)
+					config.ForgetReportRelay(probe)
+
+					return
+				}
+			}
+		}()
+
+		refuseAndRelease(seid, upfSeq, upfAddr, relaySeq)
+		close(done)
+		wg.Wait()
+
+		if slipped.Load() {
+			t.Fatalf("round %d: a retransmission was neither recognised nor answered, so it would be relayed a second time", round)
+		}
 	}
 }

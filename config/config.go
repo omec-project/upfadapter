@@ -596,8 +596,10 @@ func RenumberReportRelay(relaySeq uint32) (uint32, error) {
 
 	candidate, free := nextFreeRelaySequence(reportRelays, reportRelaySeq, relaySequenceFloor, relaySequenceCeil)
 	if !free {
-		dropRelayLocked(relaySeq)
-
+		// The claim stays. Releasing it here would end it before the caller has answered the user
+		// plane, and between those two moments a retransmission is recognised by neither the claim
+		// nor a response transaction -- so it would be relayed afresh. The caller ends the claim
+		// after its refusal is registered.
 		return 0, ErrRelaySequenceExhausted
 	}
 

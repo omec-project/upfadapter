@@ -223,7 +223,10 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 		// function retransmitting into nothing, and a rejection at least tells it the
 		// traffic will not be delivered.
 		logger.PfcpLog.Errorln("no SMF address known yet, rejecting session report request")
-		rejectSessionReport(report.SEID(), upfSeq, upfAddr)
+		if err := rejectSessionReport(report.SEID(), upfSeq, upfAddr); err != nil {
+			logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] could not be refused: %v",
+				upfSeq, upfAddr, err)
+		}
 
 		return
 	}
@@ -241,8 +244,7 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 		// answer arrived first and is still being sent, and dropping the entry from here
 		// would reopen the window that entry is holding shut.
 		if addr, seq := config.TakeReportRelay(sent.Sequence()); addr != nil {
-			rejectSessionReport(seid, seq, addr)
-			config.ForgetReportRelay(sent.Sequence())
+			refuseAndRelease(seid, seq, addr, sent.Sequence())
 		}
 	}}
 
@@ -258,7 +260,11 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 		// stops waiting and learns the traffic will not be delivered.
 		logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] cannot be relayed: %v",
 			upfSeq, upfAddr, err)
-		rejectSessionReport(seid, upfSeq, upfAddr)
+		// Nothing is claimed on this path, so there is nothing a failed refusal could strand.
+		if refuseErr := rejectSessionReport(seid, upfSeq, upfAddr); refuseErr != nil {
+			logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] could not be refused: %v",
+				upfSeq, upfAddr, refuseErr)
+		}
 
 		return
 	}
@@ -302,7 +308,7 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 			if renumberErr != nil {
 				logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] could not be relayed under another number: %v",
 					upfSeq, upfAddr, renumberErr)
-				rejectSessionReport(seid, upfSeq, upfAddr)
+				refuseAndRelease(seid, upfSeq, upfAddr, relaySeq)
 
 				return
 			}
@@ -312,21 +318,18 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 			continue
 		}
 
-		config.ForgetReportRelay(relaySeq)
-
 		logger.PfcpLog.Errorf("failed to relay session report request to SMF [%v]: %v", smfAddr, err)
-		rejectSessionReport(seid, upfSeq, upfAddr)
+		refuseAndRelease(seid, upfSeq, upfAddr, relaySeq)
 
 		return
 	}
 
-	// Every number tried was in flight. The claim goes with the attempt: nothing is being relayed
-	// for this report, so a later copy of it must be free to start its own relay.
-	config.ForgetReportRelay(relaySeq)
-
+	// Every number tried was in flight. The claim goes with the attempt -- nothing is being relayed
+	// for this report, so a later copy of it must be free to start its own relay -- but only once
+	// the refusal is registered to absorb the copies arriving meanwhile.
 	logger.PfcpLog.Errorf("no free sequence number for session report seq[%d] from UPF [%v] in %d attempts; rejecting it",
 		upfSeq, upfAddr, relaySendAttempts)
-	rejectSessionReport(seid, upfSeq, upfAddr)
+	refuseAndRelease(seid, upfSeq, upfAddr, relaySeq)
 }
 
 // HandlePfcpSessionReportResponse returns the SMF's answer to the user-plane function
@@ -381,13 +384,38 @@ func reportResponseEventData() udp.PfcpEventData {
 // function stops waiting and can release what it was holding. It is answered under the
 // sequence number that user plane used, which is not the one the report may since have
 // been renumbered to.
-func rejectSessionReport(seid uint64, upfSeq uint32, upfAddr *net.UDPAddr) {
+// refuseAndRelease tells the user plane its report will not be relayed, and only then ends the
+// claim on it.
+//
+// The order is the point. A report is absorbed by its claim while it is being relayed, and by the
+// response transaction once it has been answered -- sending the refusal registers that transaction
+// before this returns. Ending the claim first left an instant in which neither held it, and a
+// retransmission arriving there was taken for a new report and relayed on its own account: the
+// second downlink data notification this whole path exists to prevent.
+func refuseAndRelease(seid uint64, upfSeq uint32, upfAddr *net.UDPAddr, relaySeq uint32) {
+	if err := rejectSessionReport(seid, upfSeq, upfAddr); err != nil {
+		// The refusal did not go out, so there is no transaction to absorb anything, and releasing
+		// the claim would leave the report held by neither. It is kept instead: retransmissions go
+		// on being recognised as a report already in hand rather than relayed afresh, and the
+		// claim falls away with its lifetime. The user plane gets no answer either way -- this
+		// chooses the failure that does not page the UE twice.
+		logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] could not be refused either (%v); keeping the relay claim so retransmissions are not relayed afresh",
+			upfSeq, upfAddr, err)
+
+		return
+	}
+
+	config.ForgetReportRelay(relaySeq)
+}
+
+func rejectSessionReport(seid uint64, upfSeq uint32, upfAddr *net.UDPAddr) error {
 	rsp := message.NewSessionReportResponse(0, 0, seid, upfSeq, 0,
 		ie.NewCause(ie.CauseRequestRejected))
 
-	if err := udp.SendPfcp(rsp, upfAddr, reportResponseEventData()); err != nil {
-		logger.PfcpLog.Errorf("failed to reject session report request to UPF [%v]: %v", upfAddr, err)
-	}
+	// Reported rather than logged here, because sending is what registers the transaction that
+	// absorbs retransmissions of this report: a caller that releases the claim afterwards is
+	// relying on this having happened, and only the caller knows what it was holding.
+	return udp.SendPfcp(rsp, upfAddr, reportResponseEventData())
 }
 
 func HandlePfcpSessionDeletionResponse(msg message.Message) {
