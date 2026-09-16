@@ -99,6 +99,10 @@ func (t *ConsumerTable) LoadOrStore(consumerAddr string, txTable *TxTable) *TxTa
 }
 
 func init() {
+	// Released while config holds the lock that de-authorises the address, so a peer named again
+	// cannot have its answer thrown away by a release decided before it existed.
+	config.OnUpfAddrReleased(ForgetConsumer)
+
 	CPNodeID = &types.NodeID{NodeIdType: uint8(0), NodeIdValue: []byte(config.UpfAdapterIp)}
 }
 

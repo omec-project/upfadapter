@@ -69,12 +69,7 @@ func handler(w http.ResponseWriter, req *http.Request) {
 	// Remember the user plane too. A session report arrives on the UDP socket with no
 	// request of ours to match it against, so this is what tells a user plane the SMF
 	// actually talks to apart from anything else that can reach the port.
-	// The addresses this returns are ones it has stopped authorising. Reports from them are
-	// refused from here on, so the transaction table each was holding is released with it --
-	// config cannot do that itself, because udp imports config.
-	for _, released := range config.RecordUpfAddr(&udpPodMsg.UpNodeID) {
-		udp.ForgetConsumer(released)
-	}
+	config.RecordUpfAddr(&udpPodMsg.UpNodeID)
 
 	pfcpJsonRsp, err := pfcp.ForwardPfcpMsgToUpf(pfcpMessage, udpPodMsg.UpNodeID)
 	if err != nil {

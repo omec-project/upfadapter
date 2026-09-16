@@ -724,29 +724,49 @@ func TestNextFreeRelaySequenceReportsAFullRange(t *testing.T) {
 	}
 }
 
-// The caller needs to know which addresses stopped being authorised, because the per-peer state it
-// holds for them — a transaction table each, keyed by the peer's own address — is released with
-// them. Nothing else would ever remove it.
-func TestRecordUpfAddrReportsTheAddressesItReleased(t *testing.T) {
+// The release happens inside the lock that de-authorises the address, not after it. Releasing
+// afterwards leaves room for the SMF to name the address again and for a report from it to be
+// answered in between, and the release would then throw away what that answer is holding.
+func TestAnAddressThatIsLeftIsReleasedUnderTheLock(t *testing.T) {
 	isolateUpfAddrs(t)
 
-	types.InsertDnsHostIp("leaving.5gc.svc", net.ParseIP("10.42.0.28"))
+	var released []string
 
-	if released := RecordUpfAddr(types.NewNodeID("leaving.5gc.svc")); len(released) != 0 {
-		t.Fatalf("recording a new user plane released %v, want nothing", released)
-	}
+	previous := upfAddrReleased
+	OnUpfAddrReleased(func(addr string) {
+		// Held while the hook runs: taking it here would deadlock if the release were not
+		// inside the critical section, which is the property this pins.
+		if upfAddrMutex.TryLock() {
+			upfAddrMutex.Unlock()
+			t.Error("the address was released after the lock was dropped")
+		}
+
+		released = append(released, addr)
+	})
+
+	t.Cleanup(func() { OnUpfAddrReleased(previous) })
+
+	types.InsertDnsHostIp("leaving.5gc.svc", net.ParseIP("10.42.0.28"))
+	RecordUpfAddr(types.NewNodeID("leaving.5gc.svc"))
 
 	types.InsertDnsHostIp("leaving.5gc.svc", net.ParseIP("10.42.0.29"))
+	RecordUpfAddr(types.NewNodeID("leaving.5gc.svc"))
 
-	released := RecordUpfAddr(types.NewNodeID("leaving.5gc.svc"))
 	if len(released) != 1 || released[0] != "10.42.0.28" {
-		t.Errorf("the move released %v, want the address it left", released)
+		t.Errorf("released %v, want the address the user plane left", released)
 	}
 }
 
-// The same for an address that ages out rather than being left: the state goes with it.
-func TestTheSweepReportsTheAddressesItReleased(t *testing.T) {
+// The same for an address that ages out rather than being left.
+func TestAnAddressThatAgesOutIsReleased(t *testing.T) {
 	isolateUpfAddrs(t)
+
+	var released []string
+
+	previous := upfAddrReleased
+	OnUpfAddrReleased(func(addr string) { released = append(released, addr) })
+
+	t.Cleanup(func() { OnUpfAddrReleased(previous) })
 
 	RecordUpfAddr(types.NewNodeID("10.42.0.30"))
 
@@ -757,8 +777,9 @@ func TestTheSweepReportsTheAddressesItReleased(t *testing.T) {
 	}
 	upfAddrMutex.Unlock()
 
-	released := RecordUpfAddr(types.NewNodeID("10.42.0.31"))
+	RecordUpfAddr(types.NewNodeID("10.42.0.31"))
+
 	if len(released) != 1 || released[0] != "10.42.0.30" {
-		t.Errorf("the sweep released %v, want the address it aged out", released)
+		t.Errorf("released %v, want the address that aged out", released)
 	}
 }
