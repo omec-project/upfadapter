@@ -74,6 +74,15 @@ func (t *ConsumerTable) Load(consumerAddr string) (*TxTable, bool) {
 // DeleteByHost drops the tables of every consumer at one address, whatever port each was seen
 // on. A response is keyed by the peer's own source address, and the port that arrives on is the
 // peer's to choose, so releasing one guessed port would leave the entry that exists.
+// stillHolds reports whether this is the table the peer's transactions are being looked up in.
+// A table that has been replaced -- or taken away by a release -- is still perfectly usable and
+// perfectly invisible: whatever was put in it cannot be found again.
+func (t *ConsumerTable) stillHolds(consumerAddr string, table *TxTable) bool {
+	current, held := t.m.Load(consumerAddr)
+
+	return held && current == table
+}
+
 func (t *ConsumerTable) DeleteByHost(ip string) {
 	t.m.Range(func(key, _ any) bool {
 		consumerAddr, ok := key.(string)
@@ -123,18 +132,44 @@ func ForgetConsumer(ip string) {
 	Server.ConsumerTable.DeleteByHost(ip)
 }
 
+// putAttempts bounds how many times a transaction is re-registered after finding its peer's table
+// detached underneath it. A peer is released once, not repeatedly, so more than a couple of rounds
+// here means the peer is being taken away as fast as it is named -- and then the honest answer is
+// that the message cannot be registered, not another round.
+const putAttempts = 3
+
 func PutTransaction(tx *Transaction) error {
 	// Both steps insert-if-absent in one operation. Reading first and writing afterwards leaves a
 	// window between the two: two goroutines sending at once could each find the consumer table
 	// missing and create one, or each find a sequence free and store under it, and in both cases
 	// one transaction is dropped while its caller is told the message went out.
-	txTable := Server.ConsumerTable.LoadOrStore(tx.ConsumerAddr, &TxTable{})
+	for range putAttempts {
+		txTable := Server.ConsumerTable.LoadOrStore(tx.ConsumerAddr, &TxTable{})
 
-	if _, loaded := txTable.LoadOrStore(tx.SequenceNumber, tx); loaded {
-		return fmt.Errorf("insert tx error: %w %d", ErrDuplicateSequence, tx.SequenceNumber)
+		if _, loaded := txTable.LoadOrStore(tx.SequenceNumber, tx); loaded {
+			return fmt.Errorf("insert tx error: %w %d", ErrDuplicateSequence, tx.SequenceNumber)
+		}
+
+		// Those two are still two operations, and releasing the peer between them detaches the
+		// table the second one wrote into. A transaction in a detached table cannot be found again
+		// -- the next lookup for this peer creates a fresh table -- so the insert would have been
+		// reported as a success that nothing can act on: no response matched, no retransmission
+		// absorbed. Checking afterwards is what makes the pair hold together. If the table is
+		// still the peer's, the insert stands; if it is not, the transaction goes into whatever
+		// replaced it.
+		if Server.ConsumerTable.stillHolds(tx.ConsumerAddr, txTable) {
+			return nil
+		}
+
+		// What went into the detached table stays there, and is garbage as soon as this loop drops
+		// the last reference to it: nothing is watching it, because the resend goroutine is only
+		// started once this returns success.
+		logger.PfcpLog.Warnf("the transaction table for %s was detached while registering seq[%d]; registering it again",
+			tx.ConsumerAddr, tx.SequenceNumber)
 	}
 
-	return nil
+	return fmt.Errorf("could not register a transaction for %s: its table was detached on each of %d attempts",
+		tx.ConsumerAddr, putAttempts)
 }
 
 func startTxLifeCycle(tx *Transaction) {

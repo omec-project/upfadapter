@@ -7,8 +7,6 @@ package handler
 import (
 	"context"
 	"net"
-	"runtime"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -95,6 +93,13 @@ func TestASessionReportIsRelayedUnderTheNextNumberWhenOneIsInFlight(t *testing.T
 	}
 }
 
+// refusalTestSequences hands out sequence numbers no run of the refusal test has used before, so
+// runs in one process do not meet each other's answered reports: an answered report is held for
+// its resend window, and a reused number would be refused as its duplicate.
+var refusalTestSequences atomic.Uint32
+
+func init() { refusalTestSequences.Store(3000) }
+
 // absorbedByAnAnswer reports whether a retransmitted report would be met by the answer already
 // sent for it, which is what the receive path asks before a report ever reaches this handler.
 func absorbedByAnAnswer(upfAddr *net.UDPAddr, upfSeq uint32) bool {
@@ -108,77 +113,46 @@ func absorbedByAnAnswer(upfAddr *net.UDPAddr, upfSeq uint32) bool {
 	return answered
 }
 
-// A report is absorbed by its claim while it is being relayed, and by the answer once one has been
-// sent. Refusing it moves it from the first to the second, and the two must overlap: for an
-// instant where neither holds, a retransmission is neither recognised nor answered, and is relayed
-// on its own account -- the second downlink data notification, and the second page.
+// Refusing a report hands it from one absorber to another: its claim, which recognises a
+// retransmission while the report is being relayed, and the answer, which meets one once the
+// report has been refused. What this pins is that the handover completes -- the answer is
+// registered and the claim is gone -- so a retransmission after a refusal is met by the answer.
 //
-// The sampler asks the same two questions the receive path asks, in the same order, so a report it
-// would relay is a report production would relay.
-func TestARefusedReportIsNeverUnclaimedAndUnanswered(t *testing.T) {
+// It does not pin the order of those two, and no test here can. A sampler asking the two questions
+// the receive path asks has its own gap between them: it can read "no answer" before the refusal
+// is sent and "no claim" after it has been released, and report a window that never existed. An
+// earlier version of this test did exactly that, about once in a hundred rounds, and the ordering
+// it appeared to prove was an artefact. The ordering is held by refuseAndRelease being the one
+// place that ends a claim, with its reason written there.
+func TestRefusingAReportHandsItToItsAnswer(t *testing.T) {
 	listeningAdapter(t)
 
-	if runtime.GOMAXPROCS(0) < 2 {
-		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(2))
+	upfSocket, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the user plane: %v", err)
 	}
 
-	upfAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.9"), Port: config.PfcpPort}
+	defer upfSocket.Close()
 
-	const (
-		rounds = 200
-		seid   = uint64(0x9999)
-	)
+	upfAddr, ok := upfSocket.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("user plane listener is %T, want *net.UDPAddr", upfSocket.LocalAddr())
+	}
 
-	var slipped atomic.Bool
+	upfSeq := refusalTestSequences.Add(1)
 
-	for round := range rounds {
-		upfSeq := uint32(3000 + round)
+	relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+	if err != nil || !fresh {
+		t.Fatalf("claiming the report: relay %d fresh %v err %v", relaySeq, fresh, err)
+	}
 
-		relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
-		if err != nil || !fresh {
-			t.Fatalf("claiming report %d: relay %d fresh %v err %v", upfSeq, relaySeq, fresh, err)
-		}
+	refuseAndRelease(0x9999, upfSeq, upfAddr, relaySeq)
 
-		var wg sync.WaitGroup
+	if !absorbedByAnAnswer(upfAddr, upfSeq) {
+		t.Error("the refusal left no answer to meet a retransmission of the report")
+	}
 
-		done := make(chan struct{})
-
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			for {
-				select {
-				case <-done:
-					return
-				default:
-				}
-
-				if absorbedByAnAnswer(upfAddr, upfSeq) {
-					continue
-				}
-
-				probe, probeFresh, probeErr := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
-				if probeErr != nil {
-					continue
-				}
-
-				if probeFresh {
-					slipped.Store(true)
-					config.ForgetReportRelay(probe)
-
-					return
-				}
-			}
-		}()
-
-		refuseAndRelease(seid, upfSeq, upfAddr, relaySeq)
-		close(done)
-		wg.Wait()
-
-		if slipped.Load() {
-			t.Fatalf("round %d: a retransmission was neither recognised nor answered, so it would be relayed a second time", round)
-		}
+	if addr, _ := config.TakeReportRelay(relaySeq); addr != nil {
+		t.Error("the claim outlived the refusal, so the report is held by both and released by neither")
 	}
 }

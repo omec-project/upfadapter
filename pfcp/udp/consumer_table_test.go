@@ -96,3 +96,39 @@ func TestRemovingATransactionLeavesItsSuccessorAlone(t *testing.T) {
 		t.Error("the successor's response was removed by the goroutine of the transaction that preceded it")
 	}
 }
+
+// Registering a transaction is a lookup and an insertion, and a release landing between them
+// detaches the table the insertion writes into. What is put there cannot be found again -- the
+// next lookup for that peer makes a fresh table -- so the sender would be told its message went
+// out while nothing could match the response or absorb a retransmission.
+//
+// This is the question PutTransaction asks afterwards to catch that, asserted on its own: the
+// interleaving itself cannot be reproduced from a test, because the window is two adjacent
+// operations wide inside the function, and under a releaser fast enough to hit it the result is
+// indistinguishable from a release that landed one instant later.
+func TestATableTakenAwayIsNoLongerThePeersTable(t *testing.T) {
+	table := &ConsumerTable{}
+	peer := "10.42.0.31:8805"
+
+	held := table.LoadOrStore(peer, &TxTable{})
+
+	if !table.stillHolds(peer, held) {
+		t.Fatal("the table just stored is not the peer's table")
+	}
+
+	table.DeleteByHost("10.42.0.31")
+
+	if table.stillHolds(peer, held) {
+		t.Error("a table the release took away is still reported as the peer's, so a transaction registered into it would be reported as reachable")
+	}
+
+	replacement := table.LoadOrStore(peer, &TxTable{})
+
+	if replacement == held {
+		t.Fatal("the release did not detach the table")
+	}
+
+	if table.stillHolds(peer, held) {
+		t.Error("the table that was replaced is still reported as the peer's; whatever was put in it is invisible to every lookup")
+	}
+}
