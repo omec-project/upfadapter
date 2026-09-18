@@ -189,7 +189,13 @@ var (
 	// relayGenerations counts how many times each address has been released. A report is
 	// authorised under one generation and claimed under another only if a release happened in
 	// between, which is exactly the case a claim must not survive.
-	relayGenerations = make(map[string]uint64)
+	//
+	// Kept only while a claim could still be carrying the earlier count. The window between
+	// reading it and claiming under it is one handler's work -- microseconds -- so an entry older
+	// than the relay lifetime cannot be reached by anyone, and the sweep drops it. Without that
+	// the map holds one key per address ever released, which in a cluster is one per pod that has
+	// come and gone.
+	relayGenerations = make(map[string]relayGeneration)
 	reportRelaySeq   uint32
 	lastRelaySweep   time.Time
 )
@@ -265,6 +271,13 @@ var ErrPeerReleased = errors.New("the user plane was released while its report w
 // ErrRelayNotHeld reports that the relay a caller wants renumbered is no longer in the table --
 // it was answered, or given up on, while the send that failed was in flight.
 var ErrRelayNotHeld = errors.New("no such report relay")
+
+// relayGeneration is how many times an address has been released, and when it last was, so the
+// entry can be dropped once no claim could still be quoting it.
+type relayGeneration struct {
+	releasedAt time.Time
+	count      uint64
+}
 
 type reportRelay struct {
 	// Ordered so the fields carrying pointers lead: govet's fieldalignment counts the leading
@@ -498,7 +511,7 @@ func RelayGeneration(addr string) uint64 {
 	reportRelayMutex.Lock()
 	defer reportRelayMutex.Unlock()
 
-	return relayGenerations[addr]
+	return relayGenerations[addr].count
 }
 
 // RelayReportSequence allocates the sequence number the adapter uses toward the SMF for a
@@ -529,7 +542,7 @@ func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time, aut
 	// and an SMF message can release the address in that gap. Claiming anyway would leave a claim
 	// for a peer the adapter no longer relays for -- and if the address is reused, the next
 	// occupant's report matches it as a retransmission and is answered with this one's response.
-	if relayGenerations[upfAddr.IP.String()] != authorisedUnder {
+	if relayGenerations[upfAddr.IP.String()].count != authorisedUnder {
 		return 0, false, ErrPeerReleased
 	}
 
@@ -609,6 +622,14 @@ func sweepRelaysLocked(now time.Time) {
 
 	lastRelaySweep = now
 
+	for addr, generation := range relayGenerations {
+		// No claim can still be quoting this one: a claim is made in the same handler that read
+		// the count, and that handler is long gone.
+		if now.Sub(generation.releasedAt) > reportRelayLifetime {
+			delete(relayGenerations, addr)
+		}
+	}
+
 	for held, relay := range reportRelays {
 		if now.Sub(relay.recorded) <= reportRelayLifetime {
 			continue
@@ -677,7 +698,10 @@ func ForgetRelaysForHost(addr string) {
 	// last entry.
 	// Counted whether or not anything was held: what a claim needs to know is that a release
 	// happened, not that it found something to drop.
-	relayGenerations[addr]++
+	released := relayGenerations[addr]
+	released.count++
+	released.releasedAt = time.Now()
+	relayGenerations[addr] = released
 
 	for held := range relaysByHost[addr] {
 		logger.CfgLog.Infof("user plane at [%s] is no longer named by the SMF; forgetting its session report relay: adapter seq[%d], user plane seq[%d]",

@@ -332,6 +332,19 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 				relaySeq, upfSeq, upfAddr)
 
 			renumbered, renumberErr := config.RenumberReportRelay(relaySeq)
+
+			if errors.Is(renumberErr, config.ErrRelayNotHeld) {
+				// The claim is gone: the address stopped being one the SMF names while this report
+				// was being relayed, and the release took its claim with it. Answering now would
+				// create a response transaction for a peer the source gate has already revoked --
+				// and, if the address has been taken by someone else, hold it for them. Dropped
+				// instead, as a report from an unknown source is.
+				logger.PfcpLog.Warnf("session report seq[%d] from UPF [%v]: its claim was released while it was being relayed; dropping it",
+					upfSeq, upfAddr)
+
+				return
+			}
+
 			if renumberErr != nil {
 				logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] could not be relayed under another number: %v",
 					upfSeq, upfAddr, renumberErr)

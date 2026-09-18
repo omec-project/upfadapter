@@ -110,7 +110,11 @@ func withReportRelays(t *testing.T) {
 
 	reportRelayMutex.Lock()
 	relays, byHost, seq, swept := reportRelays, relaysByHost, reportRelaySeq, lastRelaySweep
+	generations := relayGenerations
 	reportRelays, relaysByHost, reportRelaySeq = make(map[uint32]reportRelay), make(map[string]map[uint32]struct{}), 0
+	// The release counts too: a test that leaves one behind changes what a later test's claim is
+	// compared against.
+	relayGenerations = make(map[string]relayGeneration)
 	// The sweep clock too: left at another test's wall-clock reading, a case that records its
 	// entries in the past would find the throttle closed and never sweep at all.
 	lastRelaySweep = time.Time{}
@@ -119,6 +123,7 @@ func withReportRelays(t *testing.T) {
 	t.Cleanup(func() {
 		reportRelayMutex.Lock()
 		reportRelays, relaysByHost, reportRelaySeq, lastRelaySweep = relays, byHost, seq, swept
+		relayGenerations = generations
 		reportRelayMutex.Unlock()
 	})
 }
@@ -523,6 +528,11 @@ func TestRecordUpfAddrKeepsAnAddressAnotherIdentityStillUses(t *testing.T) {
 // taking leaves a window in which a retransmission is relayed a second time -- a second
 // downlink data notification, and a second page.
 func TestTakeReportRelayKeepsTheEntryUntilItIsForgotten(t *testing.T) {
+	// Isolated like its siblings: taking a relay deliberately leaves the entry behind, so without
+	// this the claim survives into the next run of this test in the same process and its first
+	// report is met as a retransmission of the last one.
+	withReportRelays(t)
+
 	upfAddr := &net.UDPAddr{IP: net.ParseIP("10.42.0.220"), Port: PfcpPort}
 	now := time.Now()
 
@@ -1124,5 +1134,45 @@ func TestAClaimUnderTheCurrentGenerationIsAllowed(t *testing.T) {
 
 	if _, fresh, err := RelayReportSequence(upf, 6, time.Now(), RelayGeneration(peer.String())); err != nil || !fresh {
 		t.Errorf("RelayReportSequence() = fresh %v, err %v; want a fresh claim", fresh, err)
+	}
+}
+
+// Release counts are kept only while a claim could still be quoting them. A claim is made in the
+// same handler that read the count, so an entry older than the relay lifetime cannot be reached by
+// anyone -- and without dropping it the map holds one key for every address ever released, which
+// in a cluster is one for every pod that has come and gone.
+func TestReleaseCountsDoNotOutliveTheClaimsThatCouldQuoteThem(t *testing.T) {
+	withReportRelays(t)
+
+	reportRelayMutex.Lock()
+	relayGenerations["10.42.0.80"] = relayGeneration{count: 3, releasedAt: time.Now().Add(-2 * reportRelayLifetime)}
+	relayGenerations["10.42.0.81"] = relayGeneration{count: 1, releasedAt: time.Now()}
+	reportRelayMutex.Unlock()
+
+	// Any report at all runs the sweep.
+	relaySequence(t, &net.UDPAddr{IP: net.ParseIP("10.42.0.82"), Port: PfcpPort}, 1, time.Now())
+
+	reportRelayMutex.Lock()
+	defer reportRelayMutex.Unlock()
+
+	if _, held := relayGenerations["10.42.0.80"]; held {
+		t.Error("a release count older than the relay lifetime is still held; the map grows with every address the deployment retires")
+	}
+
+	if _, held := relayGenerations["10.42.0.81"]; !held {
+		t.Error("a recent release count was dropped; a claim quoting it would be allowed through")
+	}
+}
+
+// The contract the handler leans on when it tells a released claim from an exhausted allocator:
+// renumbering something no longer held says so with its own error, rather than reporting the same
+// failure as a range with nothing free in it. The two call for opposite answers -- one drops the
+// report, the other refuses it -- so they must not arrive as one error.
+func TestRenumberingSomethingNoLongerHeldSaysSo(t *testing.T) {
+	withReportRelays(t)
+
+	_, err := RenumberReportRelay(relaySequenceFloor + 1)
+	if !errors.Is(err, ErrRelayNotHeld) {
+		t.Errorf("RenumberReportRelay() error = %v, want %v", err, ErrRelayNotHeld)
 	}
 }
