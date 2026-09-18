@@ -76,6 +76,15 @@ func handleSendPfcpSessRelReqError(msg message.Message, pfcpErr error) {
 func sendErrRsp(msg message.Message, err error) {
 	// Get the PFCP Txn
 	pfcpTxnChan := config.GetUpfPfcpTxn(msg.Sequence())
+	if pfcpTxnChan == nil {
+		// Nothing is waiting on this sequence number -- the request never went out, or this is a
+		// second response to one already answered. Sending into the nil channel that a missing
+		// entry yields blocks this goroutine for the life of the process.
+		logger.PfcpLog.Warnf("no request is waiting for seq[%d]; dropping the failure meant for it: %v",
+			msg.Sequence(), err)
+
+		return
+	}
 
 	// Send Rsp back to http txn
 	pfcpTxnChan <- config.PfcpHttpRsp{Rsp: nil, Err: err}
@@ -90,6 +99,9 @@ func encodeAndSendRsp(msg message.Message) error {
 
 	// Get the PFCP Txn
 	pfcpTxnChan := config.GetUpfPfcpTxn(msg.Sequence())
+	if pfcpTxnChan == nil {
+		return fmt.Errorf("no request is waiting for seq[%d]", msg.Sequence())
+	}
 
 	// Send Rsp back to http txn
 	pfcpTxnChan <- config.PfcpHttpRsp{Rsp: buf, Err: nil}

@@ -332,9 +332,15 @@ func SmfAddr() *net.UDPAddr {
 // message the SMF forwards names its user plane, so this set comes back within one
 // heartbeat instead -- the same way the SMF's own address does.
 func RecordUpfAddr(nodeId *types.NodeID) {
+	// Read before resolving, so that it dates the resolution rather than the commit. Two messages
+	// naming the same node can be in flight at once -- this is called from concurrent HTTP
+	// handlers -- and resolution happens outside the lock, so the one that resolved first can
+	// reach the lock second. Without a date on it, a stale answer would be written over a fresh
+	// one: the address the node has moved away from would be authorised again, and the address it
+	// moved to forgotten.
+	now := time.Now()
 	ip := nodeId.ResolveNodeIdToIp()
 	node := nodeKey(nodeId)
-	now := time.Now()
 
 	upfAddrMutex.Lock()
 	defer upfAddrMutex.Unlock()
@@ -343,8 +349,12 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 	// after it. The other order expires a node whose name has not resolved for longer than the
 	// lifetime on the very message that shows it is still in use.
 	record := upfNodeAddrs[node]
-	record.seen = now
-	upfNodeAddrs[node] = record
+
+	superseded := record.seen.After(now)
+	if !superseded {
+		record.seen = now
+		upfNodeAddrs[node] = record
+	}
 
 	expireUpfAddrsLocked(now)
 
@@ -358,6 +368,16 @@ func RecordUpfAddr(nodeId *types.NodeID) {
 	}
 
 	key := ip.String()
+
+	if superseded {
+		// A newer resolution of this node has already been applied. This one describes where the
+		// node was, so it authorises nothing and forgets nothing -- it would undo the newer one
+		// in both directions.
+		logger.CfgLog.Infof("a later message already placed the user plane %s; not applying an older resolution to [%s]",
+			node, key)
+
+		return
+	}
 
 	// A node that moved stops authorising the address it left. Without this the set only
 	// ever grows: a user plane reached through a name, or one that came back on a new
@@ -712,6 +732,28 @@ func InsertUpfPfcpTxn(seq uint32, pfcpTxnChan PfcpTxnChan) {
 	UpfTxnsMutex.Lock()
 	UpfTxns[seq] = pfcpTxnChan
 	UpfTxnsMutex.Unlock()
+}
+
+// ForgetUpfPfcpTxn drops a registration whose request never went out. The entry is made before the
+// send, because a response can arrive before the send call returns; when the send fails there is
+// nothing to wait for it, and an entry left behind hands the next response carrying that sequence
+// number to a requester that has already gone.
+//
+// It drops its own registration and only its own. Sequence numbers are the SMF's, and a second
+// request can carry one that is already in flight here -- a retransmission does so by definition.
+// Deleting by number alone would then take that request's registration instead, and the very fault
+// this repairs would happen to it: its answer arrives, finds nothing waiting, and is dropped while
+// it waits for one that was given away.
+func ForgetUpfPfcpTxn(seq uint32, own PfcpTxnChan) {
+	UpfTxnsMutex.Lock()
+	defer UpfTxnsMutex.Unlock()
+
+	if held, ok := UpfTxns[seq]; !ok || held != own {
+		return
+	}
+
+	delete(UpfTxns, seq)
+	logger.CfgLog.Debugf("dropped the transaction with sequence number [%v]: its request did not go out", seq)
 }
 
 func GetUpfPfcpTxn(seq uint32) PfcpTxnChan {

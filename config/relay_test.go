@@ -993,3 +993,92 @@ func TestNoRetransmissionSlipsThroughARenumber(t *testing.T) {
 		t.Error("a retransmission was taken for a fresh report while its relay was being renumbered; the SMF is told twice about one report, and pages twice")
 	}
 }
+
+// Two messages naming the same user plane can be in flight at once, and the address is resolved
+// before the lock is taken -- so the one that resolved first can reach the lock second. Applied in
+// that order it would authorise the address the node has moved away from and forget the one it
+// moved to, which is the state this bookkeeping exists to keep straight.
+func TestAnOlderResolutionDoesNotUndoANewerOne(t *testing.T) {
+	isolateUpfAddrs(t)
+
+	moved := net.ParseIP("10.42.0.61")
+
+	// The newer message: the node is now at .61.
+	types.InsertDnsHostIp("moving.5gc.svc", moved)
+	RecordUpfAddr(types.NewNodeID("moving.5gc.svc"))
+
+	// The older one, resolved before the move and arriving after it.
+	stale := upfNodeRecord{addr: "10.42.0.60", seen: time.Now().Add(-time.Minute)}
+	applyStaleResolution(t, "moving.5gc.svc", stale)
+
+	if IsKnownUpfAddr(net.ParseIP("10.42.0.60")) {
+		t.Error("the address the user plane left was authorised again by a resolution that predates the move")
+	}
+
+	if !IsKnownUpfAddr(moved) {
+		t.Error("the address the user plane moved to was forgotten by a resolution that predates the move")
+	}
+}
+
+// applyStaleResolution delivers a message whose resolution is older than what the node's record
+// already holds, which is what a slow resolver produces when two messages overlap.
+func applyStaleResolution(t *testing.T, fqdn string, older upfNodeRecord) {
+	t.Helper()
+
+	types.InsertDnsHostIp(fqdn, net.ParseIP(older.addr))
+
+	upfAddrMutex.Lock()
+	record := upfNodeAddrs[nodeKey(types.NewNodeID(fqdn))]
+	record.seen = time.Now().Add(time.Minute)
+	upfNodeAddrs[nodeKey(types.NewNodeID(fqdn))] = record
+	upfAddrMutex.Unlock()
+
+	RecordUpfAddr(types.NewNodeID(fqdn))
+}
+
+// A rollback drops its own registration and only its own.
+//
+// Sequence numbers are the SMF's, and a second request can carry one that is already in flight
+// here -- a retransmission does so by definition. Deleting by number alone takes that request's
+// registration instead, and the fault this rollback exists to repair then happens to it: its
+// answer arrives, finds nothing waiting for it, and is dropped, while it waits for one that was
+// given away.
+func TestARollbackLeavesAnotherRequestsRegistrationAlone(t *testing.T) {
+	const seq = uint32(7788)
+
+	withUpfTxns(t)
+
+	failed := make(PfcpTxnChan, 1)
+	InsertUpfPfcpTxn(seq, failed)
+
+	// The second request, registering under the same number before the first rolls back.
+	current := make(PfcpTxnChan, 1)
+	InsertUpfPfcpTxn(seq, current)
+
+	ForgetUpfPfcpTxn(seq, failed)
+
+	held := GetUpfPfcpTxn(seq)
+	if held == nil {
+		t.Fatal("the rollback took the registration of a request that is still waiting; its answer would be dropped and it would wait for one given away")
+	}
+
+	if held != current {
+		t.Error("the registration under this number is not the one that is waiting")
+	}
+}
+
+// withUpfTxns isolates the transaction table, which is process-wide.
+func withUpfTxns(t *testing.T) {
+	t.Helper()
+
+	UpfTxnsMutex.Lock()
+	previous := UpfTxns
+	UpfTxns = make(map[uint32]PfcpTxnChan)
+	UpfTxnsMutex.Unlock()
+
+	t.Cleanup(func() {
+		UpfTxnsMutex.Lock()
+		UpfTxns = previous
+		UpfTxnsMutex.Unlock()
+	})
+}
