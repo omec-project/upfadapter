@@ -5,6 +5,7 @@
 package config
 
 import (
+	"errors"
 	"net"
 	"runtime"
 	"sync"
@@ -128,7 +129,7 @@ func withReportRelays(t *testing.T) {
 func relaySequence(t *testing.T, upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (uint32, bool) {
 	t.Helper()
 
-	relaySeq, fresh, err := RelayReportSequence(upfAddr, upfSeq, now)
+	relaySeq, fresh, err := RelayReportSequence(upfAddr, upfSeq, now, RelayGeneration(upfAddr.IP.String()))
 	if err != nil {
 		t.Fatalf("RelayReportSequence(%v, seq[%d]): %v", upfAddr, upfSeq, err)
 	}
@@ -634,7 +635,7 @@ func TestRelayReportSequenceSkipsANumberStillOutstanding(t *testing.T) {
 	second := &net.UDPAddr{IP: net.ParseIP("10.42.0.251"), Port: PfcpPort}
 	now := time.Now()
 
-	held, fresh, err := RelayReportSequence(first, 1, now)
+	held, fresh, err := RelayReportSequence(first, 1, now, RelayGeneration(first.IP.String()))
 	if err != nil || !fresh {
 		t.Fatalf("precondition: the first report must be relayed (fresh=%v, err=%v)", fresh, err)
 	}
@@ -644,7 +645,7 @@ func TestRelayReportSequenceSkipsANumberStillOutstanding(t *testing.T) {
 	reportRelaySeq = held - 1
 	reportRelayMutex.Unlock()
 
-	next, fresh, err := RelayReportSequence(second, 2, now)
+	next, fresh, err := RelayReportSequence(second, 2, now, RelayGeneration(second.IP.String()))
 	if err != nil || !fresh {
 		t.Fatalf("the second report was not relayed (fresh=%v, err=%v)", fresh, err)
 	}
@@ -979,7 +980,7 @@ func TestNoRetransmissionSlipsThroughARenumber(t *testing.T) {
 			default:
 			}
 
-			if _, fresh, err := RelayReportSequence(upf, 12, time.Now()); err == nil && fresh {
+			if _, fresh, err := RelayReportSequence(upf, 12, time.Now(), RelayGeneration(upf.IP.String())); err == nil && fresh {
 				slipped.Store(true)
 
 				return
@@ -1081,4 +1082,47 @@ func withUpfTxns(t *testing.T) {
 		UpfTxns = previous
 		UpfTxnsMutex.Unlock()
 	})
+}
+
+// The source check and the claim are two operations, and the address can be released between them.
+// Claiming anyway leaves a claim for a peer the adapter no longer relays for -- and an address in a
+// cluster is reused, so the next occupant's report matches it as a retransmission and is answered
+// with this one's response.
+func TestAClaimIsRefusedWhenThePeerWasReleasedAfterTheCheck(t *testing.T) {
+	isolateUpfAddrs(t)
+	withReportRelays(t)
+
+	peer := net.ParseIP("10.42.0.70")
+	upf := &net.UDPAddr{IP: peer, Port: PfcpPort}
+
+	types.InsertDnsHostIp("leaving.5gc.svc", peer)
+	RecordUpfAddr(types.NewNodeID("leaving.5gc.svc"))
+
+	// What the handler reads before it tests the source.
+	authorisedUnder := RelayGeneration(peer.String())
+
+	// And the release that lands between that test and the claim.
+	types.InsertDnsHostIp("leaving.5gc.svc", net.ParseIP("10.42.0.71"))
+	RecordUpfAddr(types.NewNodeID("leaving.5gc.svc"))
+
+	_, _, err := RelayReportSequence(upf, 5, time.Now(), authorisedUnder)
+	if !errors.Is(err, ErrPeerReleased) {
+		t.Errorf("RelayReportSequence() error = %v, want %v: the claim outlives the authorisation that allowed it", err, ErrPeerReleased)
+	}
+}
+
+// And a claim made under the generation in force is not refused, so the check above costs an
+// ordinary report nothing.
+func TestAClaimUnderTheCurrentGenerationIsAllowed(t *testing.T) {
+	isolateUpfAddrs(t)
+	withReportRelays(t)
+
+	peer := net.ParseIP("10.42.0.72")
+	upf := &net.UDPAddr{IP: peer, Port: PfcpPort}
+
+	RecordUpfAddr(types.NewNodeID("10.42.0.72"))
+
+	if _, fresh, err := RelayReportSequence(upf, 6, time.Now(), RelayGeneration(peer.String())); err != nil || !fresh {
+		t.Errorf("RelayReportSequence() = fresh %v, err %v; want a fresh claim", fresh, err)
+	}
 }

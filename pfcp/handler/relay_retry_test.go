@@ -55,7 +55,7 @@ func TestASessionReportIsRelayedUnderTheNextNumberWhenOneIsInFlight(t *testing.T
 
 	// Learn where the allocator has got to, so the test does not depend on being the first
 	// to relay anything in this process.
-	probe, _, err := config.RelayReportSequence(upfAddr, 0xFFFF, time.Now())
+	probe, _, err := config.RelayReportSequence(upfAddr, 0xFFFF, time.Now(), config.RelayGeneration(upfAddr.IP.String()))
 	if err != nil {
 		t.Fatalf("probing the allocator: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestRefusingAReportHandsItToItsAnswer(t *testing.T) {
 
 	upfSeq := refusalTestSequences.Add(1)
 
-	relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+	relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now(), config.RelayGeneration(upfAddr.IP.String()))
 	if err != nil || !fresh {
 		t.Fatalf("claiming the report: relay %d fresh %v err %v", relaySeq, fresh, err)
 	}

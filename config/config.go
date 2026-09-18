@@ -185,9 +185,13 @@ var (
 	// retransmission costs the reports outstanding from one user plane rather than from all of
 	// them, and so a peer that stops being authorised can have its origins dropped without a
 	// walk. It holds keys into reportRelays and is maintained with it, never separately.
-	relaysByHost   = make(map[string]map[uint32]struct{})
-	reportRelaySeq uint32
-	lastRelaySweep time.Time
+	relaysByHost = make(map[string]map[uint32]struct{})
+	// relayGenerations counts how many times each address has been released. A report is
+	// authorised under one generation and claimed under another only if a release happened in
+	// between, which is exactly the case a claim must not survive.
+	relayGenerations = make(map[string]uint64)
+	reportRelaySeq   uint32
+	lastRelaySweep   time.Time
 )
 
 const (
@@ -251,6 +255,12 @@ func OnUpfAddrReleased(hook func(addr string)) {
 // outstanding. It is separate from a retransmission because the answer is different: the report
 // cannot be relayed at all, and the user plane has to be told so rather than left waiting.
 var ErrRelaySequenceExhausted = errors.New("no free relay sequence number")
+
+// ErrPeerReleased reports that the address stopped being a user plane the SMF names between the
+// source check and the claim. The report cannot be relayed on its behalf: its claim would outlive
+// the authorisation, and an address that is reused would have the next occupant's report met by
+// this one's answer.
+var ErrPeerReleased = errors.New("the user plane was released while its report was being claimed")
 
 // ErrRelayNotHeld reports that the relay a caller wants renumbered is no longer in the table --
 // it was answered, or given up on, while the send that failed was in flight.
@@ -481,6 +491,16 @@ func IsKnownUpfAddr(ip net.IP) bool {
 	return false
 }
 
+// RelayGeneration reports how many times this address has been released, for a caller to hand back
+// when it claims. Read it before testing whether the address is authorised: a release between the
+// two is what this exists to catch, and one before the read is caught by the test itself.
+func RelayGeneration(addr string) uint64 {
+	reportRelayMutex.Lock()
+	defer reportRelayMutex.Unlock()
+
+	return relayGenerations[addr]
+}
+
 // RelayReportSequence allocates the sequence number the adapter uses toward the SMF for a
 // report a user-plane function raised, and remembers the origin so the answer can be
 // returned to it carrying the number it is waiting for.
@@ -501,9 +521,17 @@ func IsKnownUpfAddr(ip net.IP) bool {
 // with the answer again -- but until then the report has no transaction here at all, and
 // every copy would be renumbered and forwarded separately, raising a downlink data
 // notification each time for traffic the SMF is already being told about.
-func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time) (relaySeq uint32, fresh bool, err error) {
+func RelayReportSequence(upfAddr *net.UDPAddr, upfSeq uint32, now time.Time, authorisedUnder uint64) (relaySeq uint32, fresh bool, err error) {
 	reportRelayMutex.Lock()
 	defer reportRelayMutex.Unlock()
+
+	// The source check that let this report through released its lock before this claim was made,
+	// and an SMF message can release the address in that gap. Claiming anyway would leave a claim
+	// for a peer the adapter no longer relays for -- and if the address is reused, the next
+	// occupant's report matches it as a retransmission and is answered with this one's response.
+	if relayGenerations[upfAddr.IP.String()] != authorisedUnder {
+		return 0, false, ErrPeerReleased
+	}
 
 	sweepRelaysLocked(now)
 
@@ -647,6 +675,10 @@ func ForgetRelaysForHost(addr string) {
 	// deleting from a map while ranging over it is safe, and a second place that writes them
 	// would be a second place to remember when either grows a field. The bucket goes with its
 	// last entry.
+	// Counted whether or not anything was held: what a claim needs to know is that a release
+	// happened, not that it found something to drop.
+	relayGenerations[addr]++
+
 	for held := range relaysByHost[addr] {
 		logger.CfgLog.Infof("user plane at [%s] is no longer named by the SMF; forgetting its session report relay: adapter seq[%d], user plane seq[%d]",
 			addr, held, reportRelays[held].upfSeq)

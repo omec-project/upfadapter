@@ -222,6 +222,11 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 	// a legitimate peer nothing: a source the SMF has never named has no session here and
 	// so is holding no traffic to be told about. This runs before the rejection below so
 	// that the only peers ever answered are ones the SMF named.
+	// Read before the test, not after: what the claim below needs to know is whether a release
+	// happened between the two, and a release that happened before this read is caught by the test
+	// itself.
+	authorisedUnder := config.RelayGeneration(upfAddr.IP.String())
+
 	if !config.IsKnownUpfAddr(upfAddr.IP) {
 		logger.PfcpLog.Warnf("session report request from [%v], which is not a user plane the SMF has addressed through us; dropping it", upfAddr)
 		return
@@ -266,7 +271,17 @@ func HandlePfcpSessionReportRequest(msg message.Message, upfAddr *net.UDPAddr) {
 	// Claimed once, outside the loop. The loop is the send, which can be refused because the SMF
 	// is using the number, and the claim has to outlive that refusal: it is what a retransmission
 	// arriving meanwhile is recognised by.
-	relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now())
+	relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now(), authorisedUnder)
+	if errors.Is(err, config.ErrPeerReleased) {
+		// The address stopped being one the SMF names between the check above and this claim. The
+		// report is dropped rather than refused, for the same reason an unknown source is: a peer
+		// the adapter no longer relays for is holding no traffic this can be about.
+		logger.PfcpLog.Warnf("session report seq[%d] from UPF [%v]: the SMF stopped naming it while the report was being claimed; dropping it",
+			upfSeq, upfAddr)
+
+		return
+	}
+
 	if errors.Is(err, config.ErrRelaySequenceExhausted) {
 		// Nothing to relay under. Answering is still better than silence: the user plane
 		// stops waiting and learns the traffic will not be delivered.

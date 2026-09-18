@@ -25,6 +25,10 @@ const (
 
 type ConsumerTable struct {
 	m sync.Map // map[string]TxTable
+	// registerMu makes registering a transaction and releasing a peer's table mutually exclusive.
+	// Each step is atomic on its own through the sync.Map; the pairs are not, and a release
+	// landing inside one leaves a transaction in a table no lookup will reach again.
+	registerMu sync.Mutex
 }
 
 type PfcpEventData struct {
@@ -83,7 +87,14 @@ func (t *ConsumerTable) stillHolds(consumerAddr string, table *TxTable) bool {
 	return held && current == table
 }
 
+// DeleteByHost and PutTransaction are serialised against each other by registerMu. The sync.Map
+// underneath makes each of their steps atomic, which is not the same thing: registering is a
+// lookup and an insertion, releasing is a walk and a delete, and interleaving them leaves a
+// transaction in a table nothing will look in again.
 func (t *ConsumerTable) DeleteByHost(ip string) {
+	t.registerMu.Lock()
+	defer t.registerMu.Unlock()
+
 	t.m.Range(func(key, _ any) bool {
 		consumerAddr, ok := key.(string)
 		if !ok {
@@ -143,6 +154,10 @@ func PutTransaction(tx *Transaction) error {
 	// window between the two: two goroutines sending at once could each find the consumer table
 	// missing and create one, or each find a sequence free and store under it, and in both cases
 	// one transaction is dropped while its caller is told the message went out.
+	// Held across the lookup and the insertion, so a release cannot land between them.
+	Server.ConsumerTable.registerMu.Lock()
+	defer Server.ConsumerTable.registerMu.Unlock()
+
 	for range putAttempts {
 		txTable := Server.ConsumerTable.LoadOrStore(tx.ConsumerAddr, &TxTable{})
 
@@ -249,7 +264,19 @@ func readPfcpMessage() (message.Message, *net.UDPAddr, error) {
 		} else if tx != nil {
 			// err == nil && tx != nil => Resend Request
 			err = ErrResendRequest
-			tx.EventChannel <- ReceiveResendRequest
+
+			// Not a blocking send: this runs on the one goroutine that reads PFCP, and the channel
+			// holds a single event. A user plane retransmitting faster than its transaction reads
+			// would fill it and stop the adapter reading PFCP at all -- every session, not just
+			// this one. One pending notification says everything a second would: the transaction
+			// resends once it reads it.
+			select {
+			case tx.EventChannel <- ReceiveResendRequest:
+			default:
+				logger.PfcpLog.Debugf("a resend is already pending for seq[%d]; not queueing another",
+					msg.Sequence())
+			}
+
 			return msg, addr, err
 		} else {
 			// err == nil && tx == nil => New Request
@@ -260,7 +287,13 @@ func readPfcpMessage() (message.Message, *net.UDPAddr, error) {
 		if err != nil {
 			return msg, addr, err
 		}
-		tx.EventChannel <- ReceiveValidResponse
+		// Not a blocking send, for the same reason: a second response to a request already answered
+		// would otherwise hold the read loop until its transaction came back for the first.
+		select {
+		case tx.EventChannel <- ReceiveValidResponse:
+		default:
+			logger.PfcpLog.Debugf("seq[%d] is already answered; dropping a repeat response", msg.Sequence())
+		}
 	}
 
 	return msg, addr, nil
