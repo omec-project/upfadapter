@@ -394,6 +394,11 @@ func HandlePfcpSessionReportResponse(msg message.Message) {
 	// Only once the answer is on its way: sending it creates the response transaction that
 	// absorbs further copies of the report, and until that exists this entry is the only
 	// thing standing between a retransmission and a second relay.
+	//
+	// Registering that transaction is not writing it, and the claim goes either way. An answer
+	// that never reached the wire has answered nothing, so the user plane's next copy has to be
+	// relayed afresh; a copy absorbed by the claim of an answer that was never delivered would be
+	// answered by nothing at all.
 	defer config.ForgetReportRelay(relaySeq)
 
 	// The user-plane function is waiting for its own sequence number, not ours.
@@ -432,17 +437,16 @@ func reportResponseEventData() udp.PfcpEventData {
 // before this returns. Ending the claim first left an instant in which neither held it, and a
 // retransmission arriving there was taken for a new report and relayed on its own account: the
 // second downlink data notification this whole path exists to prevent.
+//
+// The claim ends even when the refusal could not be sent. Nothing is in flight for the report
+// then and nothing has answered it, so relaying the user plane's next copy afresh is the only
+// route left to an answer. Holding the claim instead absorbs every copy until it ages out, which
+// buys the certainty that the report is never answered at all -- and on the common way here, a
+// relay that never reached the SMF, there is no notification for a second one to duplicate.
 func refuseAndRelease(seid uint64, upfSeq uint32, upfAddr *net.UDPAddr, relaySeq uint32) {
 	if err := rejectSessionReport(seid, upfSeq, upfAddr); err != nil {
-		// The refusal did not go out, so there is no transaction to absorb anything, and releasing
-		// the claim would leave the report held by neither. It is kept instead: retransmissions go
-		// on being recognised as a report already in hand rather than relayed afresh, and the
-		// claim falls away with its lifetime. The user plane gets no answer either way -- this
-		// chooses the failure that does not page the UE twice.
-		logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] could not be refused either (%v); keeping the relay claim so retransmissions are not relayed afresh",
+		logger.PfcpLog.Errorf("session report seq[%d] from UPF [%v] could not be refused either: %v",
 			upfSeq, upfAddr, err)
-
-		return
 	}
 
 	config.ForgetReportRelay(relaySeq)

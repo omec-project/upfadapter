@@ -156,3 +156,39 @@ func TestRefusingAReportHandsItToItsAnswer(t *testing.T) {
 		t.Error("the claim outlived the refusal, so the report is held by both and released by neither")
 	}
 }
+
+// A refusal that could not be sent ends the claim all the same. Nothing is in flight for the
+// report then and nothing has answered it, so the user plane's next copy has to be relayed afresh:
+// a claim held past that absorbs every copy until it ages out, and the report is answered by
+// nothing at all.
+func TestARefusalThatNeverWentOutStillEndsTheClaim(t *testing.T) {
+	listeningAdapter(t)
+
+	upfAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.5"), Port: config.PfcpPort}
+	upfSeq := refusalTestSequences.Add(1)
+
+	relaySeq, fresh, err := config.RelayReportSequence(upfAddr, upfSeq, time.Now(), config.RelayGeneration(upfAddr.IP.String()))
+	if err != nil || !fresh {
+		t.Fatalf("claiming the report: relay %d fresh %v err %v", relaySeq, fresh, err)
+	}
+
+	// Occupy the number the refusal would go out under, so registering it is refused and the
+	// answer never reaches the wire -- the failure this is about.
+	occupied := message.NewSessionReportResponse(0, 0, 0x4242, upfSeq, 0,
+		ie.NewCause(ie.CauseRequestAccepted))
+	buf := make([]byte, occupied.MarshalLen())
+
+	if err := occupied.MarshalTo(buf); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if err := udp.PutTransaction(udp.NewTransaction(occupied, buf, udp.Server.Conn, upfAddr, nil)); err != nil {
+		t.Fatalf("occupying seq[%d] toward %v: %v", upfSeq, upfAddr, err)
+	}
+
+	refuseAndRelease(0x4242, upfSeq, upfAddr, relaySeq)
+
+	if addr, _ := config.TakeReportRelay(relaySeq); addr != nil {
+		t.Error("the claim outlived a refusal that never went out, so copies of the report are absorbed by a claim nothing will answer")
+	}
+}
