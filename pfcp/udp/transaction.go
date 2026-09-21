@@ -148,6 +148,21 @@ func (transaction *Transaction) Start() error {
 				if event == ReceiveResendRequest {
 					logger.PfcpLog.Debugf("response Transaction [%d]: receive resend request", transaction.SequenceNumber)
 					logger.PfcpLog.Debugf("response Transaction [%d]: Resend packet", transaction.SequenceNumber)
+
+					// The deadline is per quiet period, not per transaction. Started once and never
+					// reset, it measured from the first answer -- so a peer still retransmitting
+					// when it expired outlived the answer that was absorbing those copies, and the
+					// next one reached the handler as a new request. Each resend asks for the
+					// window again.
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+
+					timer.Reset(ResendResponseTimeOutPeriod * time.Second)
+
 					continue
 				}
 			case <-timer.C:
