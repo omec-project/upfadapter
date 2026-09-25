@@ -6,12 +6,14 @@
 package pfcp
 
 import (
+	"net"
+
 	"github.com/omec-project/upfadapter/logger"
 	"github.com/omec-project/upfadapter/pfcp/handler"
 	"github.com/wmnsk/go-pfcp/message"
 )
 
-func Dispatch(msg message.Message) {
+func Dispatch(msg message.Message, remoteAddr *net.UDPAddr) {
 	// TODO: Add return status to all handlers
 	msgType := msg.MessageType()
 	switch msgType {
@@ -57,12 +59,13 @@ func Dispatch(msg message.Message) {
 		handler.HandlePfcpSessionModificationResponse(msg)
 	case message.MsgTypeSessionDeletionResponse:
 		handler.HandlePfcpSessionDeletionResponse(msg)
-		/*
-			case pfcp.PFCP_SESSION_REPORT_REQUEST:
-				handler.HandlePfcpSessionReportRequest(msg)
-			case pfcp.PFCP_SESSION_REPORT_RESPONSE:
-				handler.HandlePfcpSessionReportResponse(msg)
-		*/
+	// A session report is the one message on N4 that the user-plane function
+	// originates. Relaying it, and returning the SMF's answer, is what lets an idle
+	// UE be paged at all through this adapter.
+	case message.MsgTypeSessionReportRequest:
+		handler.HandlePfcpSessionReportRequest(msg, remoteAddr)
+	case message.MsgTypeSessionReportResponse:
+		handler.HandlePfcpSessionReportResponse(msg)
 	default:
 		logger.PfcpLog.Errorf("unknown pfcp message type [%d]: %s", msgType, msg.MessageTypeName())
 		return

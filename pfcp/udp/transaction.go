@@ -21,8 +21,14 @@ type TxTable struct {
 	m sync.Map // map[uint32]*Transaction
 }
 
-func (t *TxTable) Store(sequenceNumber uint32, tx *Transaction) {
-	t.m.Store(sequenceNumber, tx)
+// LoadOrStore inserts tx for sequenceNumber unless one is already there, and reports which
+// happened. Load-then-Store is not the same thing: two goroutines numbering requests at once can
+// both find a sequence free and both store, and the second silently replaces a transaction whose
+// response is still to come.
+func (t *TxTable) LoadOrStore(sequenceNumber uint32, tx *Transaction) (*Transaction, bool) {
+	existing, loaded := t.m.LoadOrStore(sequenceNumber, tx)
+
+	return existing.(*Transaction), loaded
 }
 
 func (t *TxTable) Load(sequenceNumber uint32) (*Transaction, bool) {
@@ -38,8 +44,19 @@ func (t *TxTable) Load(sequenceNumber uint32) (*Transaction, bool) {
 	return nil, false
 }
 
-func (t *TxTable) Delete(sequenceNumber uint32) {
-	t.m.Delete(sequenceNumber)
+// DeleteIf removes the transaction under sequenceNumber only while it is still this one.
+//
+// A transaction is removed by the goroutine that ran it, which loads the table by the peer's
+// address. That address can belong to a different table by then: releasing a peer drops its
+// table, and a peer named again gets a new one. Deleting by sequence number alone would then
+// remove a live successor's transaction -- and a response's job is to stay until its resend
+// window ends, so removing it early lets the next retransmission through as a new report.
+func (t *TxTable) DeleteIf(sequenceNumber uint32, tx *Transaction) bool {
+	if t == nil {
+		return false
+	}
+
+	return t.m.CompareAndDelete(sequenceNumber, tx)
 }
 
 const (
@@ -131,6 +148,21 @@ func (transaction *Transaction) Start() error {
 				if event == ReceiveResendRequest {
 					logger.PfcpLog.Debugf("response Transaction [%d]: receive resend request", transaction.SequenceNumber)
 					logger.PfcpLog.Debugf("response Transaction [%d]: Resend packet", transaction.SequenceNumber)
+
+					// The deadline is per quiet period, not per transaction. Started once and never
+					// reset, it measured from the first answer -- so a peer still retransmitting
+					// when it expired outlived the answer that was absorbing those copies, and the
+					// next one reached the handler as a new request. Each resend asks for the
+					// window again.
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+
+					timer.Reset(ResendResponseTimeOutPeriod * time.Second)
+
 					continue
 				}
 			case <-timer.C:

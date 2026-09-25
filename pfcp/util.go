@@ -16,7 +16,10 @@ import (
 )
 
 func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID) ([]byte, error) {
-	pfcpTxnChan := make(config.PfcpTxnChan)
+	// Room for one answer. The answer is sent from the PFCP receive path, which must not block on
+	// a requester that is no longer waiting -- a send that failed leaves this HTTP handler on its
+	// way out, and an unbuffered channel would wedge the receive goroutine on it for good.
+	pfcpTxnChan := make(config.PfcpTxnChan, 1)
 	var err error
 
 	// identify msg type
@@ -55,8 +58,13 @@ func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID
 
 		// store txn in seq:chan map
 		config.InsertUpfPfcpTxn(associationReq.Sequence(), pfcpTxnChan)
-		err = message.SendPfcpAssociationSetupRequest(upNodeID, associationReq)
-		if err != nil {
+
+		if err = message.SendPfcpAssociationSetupRequest(upNodeID, associationReq); err != nil {
+			// The registration goes with the send. Left behind, the next response to carry this
+			// sequence number is handed to a requester that has already gone, and the answer the
+			// requester it belongs to is waiting for never arrives.
+			config.ForgetUpfPfcpTxn(associationReq.Sequence(), pfcpTxnChan)
+
 			return nil, err
 		}
 	case pfcp_message.MsgTypeHeartbeatRequest:
@@ -71,8 +79,13 @@ func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID
 
 		// store txn in seq:chan map
 		config.InsertUpfPfcpTxn(heartbeatReq.Sequence(), pfcpTxnChan)
-		err = message.SendHeartbeatRequest(upNodeID, heartbeatReq)
-		if err != nil {
+
+		if err = message.SendHeartbeatRequest(upNodeID, heartbeatReq); err != nil {
+			// The registration goes with the send. Left behind, the next response to carry this
+			// sequence number is handed to a requester that has already gone, and the answer the
+			// requester it belongs to is waiting for never arrives.
+			config.ForgetUpfPfcpTxn(heartbeatReq.Sequence(), pfcpTxnChan)
+
 			return nil, err
 		}
 	case pfcp_message.MsgTypeSessionEstablishmentRequest:
@@ -96,8 +109,12 @@ func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID
 		// store txn in seq:chan map
 		config.InsertUpfPfcpTxn(sessionEstablishmentReq.Sequence(), pfcpTxnChan)
 
-		err = message.SendPfcpSessionEstablishmentRequest(upNodeID, sessionEstablishmentReq)
-		if err != nil {
+		if err = message.SendPfcpSessionEstablishmentRequest(upNodeID, sessionEstablishmentReq); err != nil {
+			// The registration goes with the send. Left behind, the next response to carry this
+			// sequence number is handed to a requester that has already gone, and the answer the
+			// requester it belongs to is waiting for never arrives.
+			config.ForgetUpfPfcpTxn(sessionEstablishmentReq.Sequence(), pfcpTxnChan)
+
 			return nil, err
 		}
 	case pfcp_message.MsgTypeSessionModificationRequest:
@@ -108,8 +125,13 @@ func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID
 
 		// store txn in seq:chan map
 		config.InsertUpfPfcpTxn(sessionModificationReq.Sequence(), pfcpTxnChan)
-		err = message.SendPfcpSessionModificationRequest(upNodeID, sessionModificationReq)
-		if err != nil {
+
+		if err = message.SendPfcpSessionModificationRequest(upNodeID, sessionModificationReq); err != nil {
+			// The registration goes with the send. Left behind, the next response to carry this
+			// sequence number is handed to a requester that has already gone, and the answer the
+			// requester it belongs to is waiting for never arrives.
+			config.ForgetUpfPfcpTxn(sessionModificationReq.Sequence(), pfcpTxnChan)
+
 			return nil, err
 		}
 	case pfcp_message.MsgTypeSessionDeletionRequest:
@@ -120,8 +142,13 @@ func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID
 
 		// store txn in seq:chan map
 		config.InsertUpfPfcpTxn(sessionDeletionReq.Sequence(), pfcpTxnChan)
-		err = message.SendPfcpSessionDeletionRequest(upNodeID, sessionDeletionReq)
-		if err != nil {
+
+		if err = message.SendPfcpSessionDeletionRequest(upNodeID, sessionDeletionReq); err != nil {
+			// The registration goes with the send. Left behind, the next response to carry this
+			// sequence number is handed to a requester that has already gone, and the answer the
+			// requester it belongs to is waiting for never arrives.
+			config.ForgetUpfPfcpTxn(sessionDeletionReq.Sequence(), pfcpTxnChan)
+
 			return nil, err
 		}
 	default:
