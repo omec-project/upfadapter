@@ -6,6 +6,7 @@
 package udp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -334,7 +335,10 @@ func findTransaction(msg message.Message, addr *net.UDPAddr) (*Transaction, erro
 	return tx, nil
 }
 
-func Run(Dispatch func(message.Message, *net.UDPAddr)) {
+// Run listens for PFCP on the adapter's address and dispatches what it reads
+// until ctx is cancelled. It returns once the socket is closed and the read
+// loop has stopped, or at once if the socket cannot be opened.
+func Run(ctx context.Context, Dispatch func(message.Message, *net.UDPAddr)) {
 	addr := &net.UDPAddr{
 		IP:   net.ParseIP(CPNodeID.ResolveNodeIdToIp().String()),
 		Port: PFCP_PORT,
@@ -350,22 +354,46 @@ func Run(Dispatch func(message.Message, *net.UDPAddr)) {
 	}
 	logger.PfcpLog.Infof("listen on %s", addr.String())
 
+	ServerStartTime = time.Now()
+	serve(ctx, conn, Dispatch)
+}
+
+// serve runs the read loop on conn until ctx is cancelled, then closes conn
+// and waits for the loop to stop.
+func serve(ctx context.Context, conn *net.UDPConn, Dispatch func(message.Message, *net.UDPAddr)) {
+	loopDone := make(chan struct{})
 	go func() {
-		for {
-			pfcpMessage, remoteAddr, err := readPfcpMessage()
-			if err != nil {
-				if err == ErrResendRequest {
-					logger.PfcpLog.Infoln(err)
-				} else {
-					logger.PfcpLog.Warnf("read PFCP error: %v", err)
-				}
-				continue
-			}
-			go Dispatch(pfcpMessage, remoteAddr)
-		}
+		defer close(loopDone)
+		readLoop(Dispatch)
 	}()
 
-	ServerStartTime = time.Now()
+	<-ctx.Done()
+	if err := conn.Close(); err != nil {
+		logger.PfcpLog.Warnf("closing PFCP socket: %v", err)
+	}
+	<-loopDone
+}
+
+// readLoop reads PFCP messages until the socket is closed. Any other read error
+// is logged and the loop goes on; a closed socket fails every read at once, so
+// going on would spin.
+func readLoop(Dispatch func(message.Message, *net.UDPAddr)) {
+	for {
+		pfcpMessage, remoteAddr, err := readPfcpMessage()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				logger.PfcpLog.Infoln("PFCP socket closed, stopped reading")
+				return
+			}
+			if err == ErrResendRequest {
+				logger.PfcpLog.Infoln(err)
+			} else {
+				logger.PfcpLog.Warnf("read PFCP error: %v", err)
+			}
+			continue
+		}
+		go Dispatch(pfcpMessage, remoteAddr)
+	}
 }
 
 func removeTransaction(tx *Transaction) error {

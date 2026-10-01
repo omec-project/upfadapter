@@ -6,11 +6,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/omec-project/upfadapter/config"
 	"github.com/omec-project/upfadapter/logger"
@@ -96,12 +100,45 @@ func main() {
 		}
 	}
 
+	// SIGTERM (a pod delete or a rollout) and Ctrl-C stop the HTTP server and
+	// close the PFCP socket; main then returns and the process exits 0.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// UDP handler for pfcp msg from UPF
-	go udp.Run(pfcp.Dispatch)
+	pfcpDone := make(chan struct{})
+	go func() {
+		defer close(pfcpDone)
+		udp.Run(ctx, pfcp.Dispatch)
+	}()
 
 	http.HandleFunc("/", handler)
-	err := http.ListenAndServe(":8090", nil)
-	if err != nil {
+	server := &http.Server{Addr: ":8090", ReadHeaderTimeout: 10 * time.Second}
+	if err := serve(ctx, server, 5*time.Second); err != nil {
 		logger.AppLog.Errorf("error listening TCP connection: %v", err)
+		return
 	}
+	// Return only once the PFCP socket is closed.
+	<-pfcpDone
+	logger.AppLog.Infoln("UPF adapter terminated")
+}
+
+// serve runs server until ctx is cancelled, then shuts it down, waiting at
+// most timeout for requests in flight. It returns an error only if the server
+// fails before that.
+func serve(ctx context.Context, server *http.Server, timeout time.Duration) error {
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ListenAndServe() }()
+	select {
+	case err := <-serveErr:
+		return err
+	case <-ctx.Done():
+	}
+	logger.AppLog.Infoln("terminating UPF adapter")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.AppLog.Warnf("HTTP server shutdown: %v", err)
+	}
+	return nil
 }
