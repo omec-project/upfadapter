@@ -14,5 +14,5 @@ import (
 type Message struct {
 	RemoteAddr  *net.UDPAddr
 	PfcpMessage message.Message
-	EventData   interface{}
+	EventData   any
 }
