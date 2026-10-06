@@ -210,7 +210,7 @@ func startTxLifeCycle(tx *Transaction) {
 	}
 }
 
-func SendPfcp(msg message.Message, addr *net.UDPAddr, eventData interface{}) error {
+func SendPfcp(msg message.Message, addr *net.UDPAddr, eventData any) error {
 	if Server == nil {
 		return fmt.Errorf("PFCP server is not initialized")
 	}
