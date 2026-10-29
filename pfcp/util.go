@@ -34,6 +34,7 @@ func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID
 			if err1 != nil {
 				return nil, fmt.Errorf("error building association response: %v", err1)
 			}
+			answerRetention(pfcpAssociationRsp, pfcpMessage)
 			buf := make([]byte, pfcpAssociationRsp.MarshalLen())
 			err = pfcpAssociationRsp.MarshalTo(buf)
 			if err != nil {
@@ -159,4 +160,40 @@ func ForwardPfcpMsgToUpf(pfcpMessage pfcp_message.Message, upNodeID types.NodeID
 	pfcpRsp := <-pfcpTxnChan
 
 	return pfcpRsp.Rsp, pfcpRsp.Err
+}
+
+// psrei is the PSREI (PFCP Session Retained Indication) bit of PFCPASRsp-Flags, TS 29.244 clause
+// 8.2.134 (bit 1 of octet 5).
+const psrei = 0x01
+
+// answerRetention sets PSREI on an association response this adapter gives from its stored copy of
+// the UPF's, as the request asked.
+//
+// TS 29.244 clause 6.2.6.2.2: a request for a node ID that already has an association replaces it,
+// and the UP function deletes that association's sessions unless the request carries PFCP Session
+// Retention Information; if it does and they were retained, the response sets PSREI. Answered here,
+// the request never reaches the UPF and the adapter's own association with it is not replaced, so
+// the UPF keeps the sessions for as long as that association stands, and PSREI is the answer to
+// whether the SMF asked. The adapter does not detect a UPF restart or the loss of its association,
+// and once associated it answers from the stored copy regardless, so in that state this says the
+// sessions were retained when the UPF no longer has them. The stored copy is the UPF's answer to
+// an earlier request, so its PSREI answered that one and is not passed on; its other flags are the
+// UPF's and are kept.
+func answerRetention(rsp *pfcp_message.AssociationSetupResponse, req pfcp_message.Message) {
+	var flags uint8
+	if rsp.PFCPASRspFlags != nil {
+		// A flags IE the stored answer cannot be read from carries nothing to keep.
+		if stored, err := rsp.PFCPASRspFlags.PFCPASRspFlags(); err == nil {
+			flags = stored
+		}
+	}
+	flags &^= psrei
+	if asreq, ok := req.(*pfcp_message.AssociationSetupRequest); ok && asreq.PFCPSessionRetentionInformation != nil {
+		flags |= psrei
+	}
+
+	rsp.PFCPASRspFlags = nil
+	if flags != 0 {
+		rsp.PFCPASRspFlags = ie.NewPFCPASRspFlags(flags)
+	}
 }
