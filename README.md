@@ -4,6 +4,8 @@ SPDX-FileCopyrightText: 2024 Canonical Ltd.
 SPDX-License-Identifier: Apache-2.0
 -->
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/omec-project/upfadapter/badge)](https://scorecard.dev/viewer/?uri=github.com/omec-project/upfadapter)
+[![GitHub latest release (SemVer)](https://img.shields.io/github/v/release/omec-project/upfadapter?sort=semver)](https://github.com/omec-project/upfadapter/releases)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://spdx.org/licenses/Apache-2.0.html)
 
 # upfadapter
 
