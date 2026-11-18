@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-package main
+package service
 
 import (
 	"context"
@@ -16,13 +16,51 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/omec-project/upfadapter/config"
-	"github.com/omec-project/upfadapter/logger"
-	"github.com/omec-project/upfadapter/pfcp"
-	"github.com/omec-project/upfadapter/pfcp/udp"
+	"github.com/omec-project/upfadapter/internal/config"
+	"github.com/omec-project/upfadapter/internal/logger"
+	"github.com/omec-project/upfadapter/internal/pfcp"
+	"github.com/omec-project/upfadapter/internal/pfcp/udp"
 	"github.com/wmnsk/go-pfcp/message"
 	"go.uber.org/zap/zapcore"
 )
+
+type UPFAdapter struct{}
+
+// Initialize applies the UPFADAPTER_LOG_LEVEL override, if set.
+func (*UPFAdapter) Initialize() {
+	if lvl := os.Getenv("UPFADAPTER_LOG_LEVEL"); lvl != "" {
+		if level, err := zapcore.ParseLevel(lvl); err != nil {
+			logger.CfgLog.Warnf("invalid UPFADAPTER_LOG_LEVEL [%s]; keeping current log level. Accepted values include: debug, info, warn, error, dpanic, panic, fatal.", lvl)
+		} else {
+			logger.SetLogLevel(level)
+		}
+	}
+}
+
+// Start runs the adapter until SIGINT or SIGTERM (a pod delete or a rollout), or the HTTP
+// server fails. It stops the HTTP server and closes the PFCP socket before returning.
+func (*UPFAdapter) Start() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// UDP handler for pfcp msg from UPF
+	pfcpDone := make(chan struct{})
+	go func() {
+		defer close(pfcpDone)
+		udp.Run(ctx, pfcp.Dispatch)
+	}()
+
+	http.HandleFunc("/", handler)
+	server := &http.Server{Addr: ":8090", ReadHeaderTimeout: 10 * time.Second}
+	if err := serve(ctx, server, 5*time.Second); err != nil {
+		logger.AppLog.Errorf("error listening TCP connection: %v", err)
+		return err
+	}
+	// Return only once the PFCP socket is closed.
+	<-pfcpDone
+	logger.AppLog.Infoln("UPF adapter terminated")
+	return nil
+}
 
 // Handler for SMF initiated msgs
 func handler(w http.ResponseWriter, req *http.Request) {
@@ -88,39 +126,6 @@ func handler(w http.ResponseWriter, req *http.Request) {
 		logger.AppLog.Errorf("error writing pfcp msg: %v", err)
 	}
 	logger.AppLog.Debugf("response sent for %v", pfcpMessage.MessageType())
-}
-
-// Handler for msgs from SMF
-func main() {
-	if lvl := os.Getenv("UPFADAPTER_LOG_LEVEL"); lvl != "" {
-		if level, err := zapcore.ParseLevel(lvl); err != nil {
-			logger.CfgLog.Warnf("invalid UPFADAPTER_LOG_LEVEL [%s]; keeping current log level. Accepted values include: debug, info, warn, error, dpanic, panic, fatal.", lvl)
-		} else {
-			logger.SetLogLevel(level)
-		}
-	}
-
-	// SIGTERM (a pod delete or a rollout) and Ctrl-C stop the HTTP server and
-	// close the PFCP socket; main then returns and the process exits 0.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// UDP handler for pfcp msg from UPF
-	pfcpDone := make(chan struct{})
-	go func() {
-		defer close(pfcpDone)
-		udp.Run(ctx, pfcp.Dispatch)
-	}()
-
-	http.HandleFunc("/", handler)
-	server := &http.Server{Addr: ":8090", ReadHeaderTimeout: 10 * time.Second}
-	if err := serve(ctx, server, 5*time.Second); err != nil {
-		logger.AppLog.Errorf("error listening TCP connection: %v", err)
-		return
-	}
-	// Return only once the PFCP socket is closed.
-	<-pfcpDone
-	logger.AppLog.Infoln("UPF adapter terminated")
 }
 
 // serve runs server until ctx is cancelled, then shuts it down, waiting at

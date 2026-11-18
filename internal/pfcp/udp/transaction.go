@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/omec-project/upfadapter/logger"
+	"github.com/omec-project/upfadapter/internal/logger"
 	"github.com/wmnsk/go-pfcp/message"
 )
 

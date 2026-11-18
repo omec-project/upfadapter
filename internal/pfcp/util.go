@@ -6,11 +6,11 @@ package pfcp
 import (
 	"fmt"
 
-	"github.com/omec-project/upfadapter/config"
-	"github.com/omec-project/upfadapter/logger"
-	"github.com/omec-project/upfadapter/pfcp/handler"
-	"github.com/omec-project/upfadapter/pfcp/message"
-	"github.com/omec-project/upfadapter/types"
+	"github.com/omec-project/upfadapter/internal/config"
+	"github.com/omec-project/upfadapter/internal/logger"
+	"github.com/omec-project/upfadapter/internal/pfcp/handler"
+	"github.com/omec-project/upfadapter/internal/pfcp/message"
+	"github.com/omec-project/upfadapter/internal/types"
 	"github.com/wmnsk/go-pfcp/ie"
 	pfcp_message "github.com/wmnsk/go-pfcp/message"
 )

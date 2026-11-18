@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/omec-project/upfadapter/logger"
-	"github.com/omec-project/upfadapter/types"
+	"github.com/omec-project/upfadapter/internal/logger"
+	"github.com/omec-project/upfadapter/internal/types"
 	"github.com/wmnsk/go-pfcp/message"
 )
 

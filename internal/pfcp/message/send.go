@@ -6,10 +6,10 @@ package message
 import (
 	"net"
 
-	"github.com/omec-project/upfadapter/logger"
-	"github.com/omec-project/upfadapter/pfcp/handler"
-	"github.com/omec-project/upfadapter/pfcp/udp"
-	"github.com/omec-project/upfadapter/types"
+	"github.com/omec-project/upfadapter/internal/logger"
+	"github.com/omec-project/upfadapter/internal/pfcp/handler"
+	"github.com/omec-project/upfadapter/internal/pfcp/udp"
+	"github.com/omec-project/upfadapter/internal/types"
 	"github.com/wmnsk/go-pfcp/message"
 )
 

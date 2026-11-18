@@ -8,8 +8,8 @@ package pfcp
 import (
 	"net"
 
-	"github.com/omec-project/upfadapter/logger"
-	"github.com/omec-project/upfadapter/pfcp/handler"
+	"github.com/omec-project/upfadapter/internal/logger"
+	"github.com/omec-project/upfadapter/internal/pfcp/handler"
 	"github.com/wmnsk/go-pfcp/message"
 )
 
