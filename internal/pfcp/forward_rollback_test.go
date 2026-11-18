@@ -7,8 +7,8 @@ package pfcp
 import (
 	"testing"
 
-	"github.com/omec-project/upfadapter/config"
-	"github.com/omec-project/upfadapter/types"
+	"github.com/omec-project/upfadapter/internal/config"
+	"github.com/omec-project/upfadapter/internal/types"
 	pfcp_message "github.com/wmnsk/go-pfcp/message"
 )
 

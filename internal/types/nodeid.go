@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/omec-project/upfadapter/logger"
+	"github.com/omec-project/upfadapter/internal/logger"
 )
 
 const (

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/omec-project/upfadapter/config"
-	"github.com/omec-project/upfadapter/pfcp/udp"
-	"github.com/omec-project/upfadapter/types"
+	"github.com/omec-project/upfadapter/internal/config"
+	"github.com/omec-project/upfadapter/internal/pfcp/udp"
+	"github.com/omec-project/upfadapter/internal/types"
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 )

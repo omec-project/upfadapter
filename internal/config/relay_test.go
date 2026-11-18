@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/omec-project/upfadapter/types"
+	"github.com/omec-project/upfadapter/internal/types"
 )
 
 // withSmfAddr isolates the package-level SMF address so ordering between tests cannot

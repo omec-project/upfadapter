@@ -7,7 +7,7 @@ package udp_test
 import (
 	"testing"
 
-	"github.com/omec-project/upfadapter/pfcp/udp"
+	"github.com/omec-project/upfadapter/internal/pfcp/udp"
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 )
